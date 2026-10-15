@@ -5,16 +5,18 @@ description: Use when reading, searching, uploading, downloading, sharing, or or
 
 # Google Workspace (gws)
 
-`gws` ([googleworkspace/cli](https://github.com/googleworkspace/cli)) calls every Workspace API and prints JSON. This skill runs it through the gws-accounts wrapper, installed ahead of it on PATH: every call names an account, and the account's tier decides which credential the call runs on. Real gws ignores `GWS_ACCOUNT` and `GWS_TIER` and runs every call on its default store, so check for the wrapper (below) before any other call. gws has no MCP server mode; the CLI is the only path.
+`gws` ([googleworkspace/cli](https://github.com/googleworkspace/cli)) calls every Workspace API and prints JSON. This skill runs it through the gws-accounts wrapper, installed ahead of it on PATH: every call names an account, and the account's tier decides which credential the call runs on. Real gws ignores `GWS_ACCOUNT` and `GWS_TIER` and runs every call on its default store, so run the check below before any other call. gws has no MCP server mode; the CLI is the only path.
 
 ## Choose an account and a tier
 
-`~/.config/gws/accounts.json` lists the accounts. Before the first call, run one with no account selected:
+`~/.config/gws/accounts.json` lists the accounts. Before the first call, check what calls will run on:
 
 ```bash
-env -u GWS_ACCOUNT -u GOOGLE_WORKSPACE_CLI_CONFIG_DIR -u GOOGLE_WORKSPACE_CLI_TOKEN -u GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE gws drive about get
+for v in GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR; do [ -z "$(printenv "$v")" ] || echo "$v is set"; done
+env -u GWS_ACCOUNT gws drive about get
 ```
 
+- `<variable> is set`, whatever gws printed: that exported variable overrides account selection, and a call could run on its store or credential instead of the account it names. Stop and tell the user which variable is set and that it overrides account selection.
 - `gws-accounts: no account selected`, followed by every account and tier with its description: the wrapper is in place. Pick an account from those descriptions. Never invent an account, and when the user's words fit more than one, ask.
 - Any other `gws-accounts:` error: the wrapper is in place but its setup is not (a missing `accounts.json`, for one). Stop and tell the user what it says.
 - Anything else, success included: `gws` on PATH is not the wrapper, and every call below would run on real gws's default store, whatever account it names. Stop, run `type -a gws`, and tell the user the gws-accounts wrapper is not first on PATH.
