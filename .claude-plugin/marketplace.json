@@ -1,0 +1,11 @@
+{
+  "name": "gws-accounts",
+  "owner": { "name": "Sami Jawhar" },
+  "plugins": [
+    {
+      "name": "gws-accounts",
+      "source": "./",
+      "description": "Google Workspace through gws with named accounts and least-privilege credential tiers"
+    }
+  ]
+}

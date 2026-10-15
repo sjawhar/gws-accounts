@@ -1,0 +1,9 @@
+{
+  "name": "gws-accounts",
+  "description": "Google Workspace through gws with named accounts and least-privilege credential tiers: the google-workspace skill",
+  "author": { "name": "Sami Jawhar" },
+  "homepage": "https://github.com/sjawhar/gws-accounts",
+  "repository": "https://github.com/sjawhar/gws-accounts",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["google-workspace", "gws", "gmail", "google-drive", "google-docs"]
+}
