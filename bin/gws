@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# gws-accounts-wrapper: gws with named accounts and credential tiers.
+#
+# Install ahead of the real gws on PATH. A call names its account with
+# GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws/<account>" or the shorthand
+# GWS_ACCOUNT=<account>; ~/.config/gws/accounts.json lists the accounts. An
+# account with `tiers` runs on the credential its selected tier's command
+# injects (GWS_TIER=<tier>, default `read`). An account without tiers runs on
+# the login `gws auth login` stored in its directory. README.md has the contract.
+set -euo pipefail
+
+readonly ACCOUNTS_ROOT="${HOME}/.config/gws"
+readonly ACCOUNTS_FILE="${ACCOUNTS_ROOT}/accounts.json"
+readonly DEFAULT_TIER=read
+
+# jq definitions shared by every query of accounts.json. `token` turns an
+# account or tier name into its part of a credential variable name; `errors`
+# yields one message per problem in the file.
+readonly JQ_DEFS='
+def token: ascii_upcase | gsub("[^A-Z0-9]"; "_");
+def desc: if (.description // "") == "" then "" else ": \(.description)" end;
+def errors:
+  if type != "object" then "must be a JSON object keyed by account name"
+  else
+    (to_entries[] | .key as $a | .value as $v
+      | if ($a | test("^[^/]+$") | not) or $a == "." or $a == ".." then "account name \($a | tojson) is not a directory name"
+        elif ($v | type) != "object" then "account \($a): its entry must be an object"
+        elif ($v.description // "" | type) != "string" then "account \($a): description must be a string"
+        elif ($v | has("tiers") | not) then empty
+        elif ($v.tiers | type) != "object" or ($v.tiers | length) == 0 then "account \($a): tiers must be a non-empty object"
+        else
+          ($v.tiers | to_entries[] | .key as $t | .value as $tv
+            | if ($t | test("^[A-Za-z0-9_-]+$") | not) then "account \($a): tier name \($t | tojson) must match [A-Za-z0-9_-]+"
+              elif ($tv | type) != "object" then "account \($a), tier \($t): must be an object"
+              elif (($tv | keys) - ["command", "description"]) != [] then "account \($a), tier \($t): unknown field \((($tv | keys) - ["command", "description"])[0] | tojson)"
+              elif ($tv.command | type) != "array" or ($tv.command | length) == 0 or ([$tv.command[] | type] | unique) != ["string"] then "account \($a), tier \($t): command must be a non-empty array of strings"
+              elif ($tv.description // "" | type) != "string" then "account \($a), tier \($t): description must be a string"
+              else empty end)
+        end),
+    ([to_entries[] | select(.value | has("tiers")) | {name: .key, token: (.key | token)}]
+      | group_by(.token)[] | select(length > 1)
+      | "accounts \(map(.name | tojson) | join(" and ")) both map to \(.[0].token) in credential variable names"),
+    ([to_entries[] | .key as $a | (.value.tiers // {}) | keys[] | {where: "\($a)/\(.)", key: "GWS_\($a | token)_\(. | token)_OAUTH"}]
+      | group_by(.key)[] | select(length > 1)
+      | "\(map(.where) | join(" and ")) both use the credential variable \(.[0].key)")
+  end;
+'
+
+die() {
+    echo "gws-accounts: $*" >&2
+    exit 1
+}
+
+is_wrapper() {
+    # Every copy of this wrapper carries its marker in its first bytes, so a
+    # second copy on PATH (a plugin's bin/, a clone) is skipped, not exec'd.
+    local head_bytes
+    head_bytes="$(head -c 512 -- "$1" 2>/dev/null | tr -d '\000')" || return 1
+    [[ "$head_bytes" == *gws-accounts-wrapper* ]]
+}
+
+find_real_gws() {
+    local candidate
+    while IFS= read -r candidate; do
+        is_wrapper "$candidate" && continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(type -ap gws)
+    echo "gws-accounts: the real gws is not on PATH (npm install -g @googleworkspace/cli)" >&2
+    return 127
+}
+
+scrub_args() {
+    # SCRUB_ARGS := `-u NAME` for the re-entry marker and every GWS_*_OAUTH
+    # variable: a credential reaches real gws as a 0600 file and no other way.
+    SCRUB_ARGS=(-u GWS_ACCOUNTS_REENTRY)
+    local name
+    for name in $(compgen -v); do
+        case "$name" in
+            GWS_*_OAUTH) SCRUB_ARGS+=(-u "$name") ;;
+        esac
+    done
+}
+
+exec_real() {
+    local real_gws="$1"
+    shift
+    scrub_args
+    exec env "${SCRUB_ARGS[@]}" "$real_gws" "$@"
+}
+
+# gws parses its first non-flag argument as the service (`gws --format json
+# auth status` is an error), so these agree with gws about the subcommand.
+first_arg() {
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        printf '%s\n' "$arg"
+        return 0
+    done
+}
+
+auth_subcommand() {
+    local arg seen=0
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        if (( seen == 0 )); then
+            seen=1
+            continue
+        fi
+        printf '%s\n' "$arg"
+        return 0
+    done
+}
+
+require_jq() {
+    command -v jq >/dev/null 2>&1 && return 0
+    echo "gws-accounts: jq is not on PATH" >&2
+    exit 127
+}
+
+validate_accounts() {
+    [[ -f "$ACCOUNTS_FILE" ]] || die "$ACCOUNTS_FILE not found. Create it (see the gws-accounts README), or set GOOGLE_WORKSPACE_CLI_CONFIG_DIR to a gws config directory outside it to run gws without an account."
+    require_jq
+    local err
+    err="$(jq -r "${JQ_DEFS}"'first(errors) // empty' "$ACCOUNTS_FILE")" || die "$ACCOUNTS_FILE is not valid JSON"
+    [[ -z "$err" ]] || die "$ACCOUNTS_FILE: $err"
+}
+
+list_accounts() {
+    jq -r "${JQ_DEFS}"'
+        to_entries[]
+        | "  \(.key)\(.value | desc)",
+          (if (.value | has("tiers")) then (.value.tiers | to_entries[] | "      GWS_TIER=\(.key)\(.value | desc)")
+           else "      no tiers: runs on the login gws auth login stored in its directory" end)' "$ACCOUNTS_FILE"
+}
+
+list_tiers() {
+    jq -r --arg account "$1" "${JQ_DEFS}"'.[$account].tiers | to_entries[] | "  GWS_TIER=\(.key)\(.value | desc)"' "$ACCOUNTS_FILE"
+}
+
+account_listed() {
+    [[ "$(jq -r --arg account "$1" 'has($account)' "$ACCOUNTS_FILE")" == true ]]
+}
+
+load_account() {
+    # Sets ACCOUNT_KNOWN, ACCOUNT_TOKEN, HAS_TIERS, TIER_KNOWN, TIER_TOKEN and
+    # TIER_COMMAND for account $1 and tier $2 from the validated accounts file.
+    ACCOUNT_KNOWN=0 ACCOUNT_TOKEN="" HAS_TIERS=0 TIER_KNOWN=0 TIER_TOKEN=""
+    TIER_COMMAND=()
+    local assignments
+    assignments="$(jq -r --arg account "$1" --arg tier "$2" "${JQ_DEFS}"'
+        if has($account) | not then "ACCOUNT_KNOWN=0"
+        else .[$account] as $v
+          | "ACCOUNT_KNOWN=1",
+            "ACCOUNT_TOKEN=\($account | token | @sh)",
+            (if ($v | has("tiers") | not) then "HAS_TIERS=0"
+             elif ($v.tiers | has($tier)) then
+               "HAS_TIERS=1", "TIER_KNOWN=1",
+               "TIER_TOKEN=\($tier | token | @sh)",
+               "TIER_COMMAND=(\($v.tiers[$tier].command | @sh))"
+             else "HAS_TIERS=1", "TIER_KNOWN=0" end)
+        end' "$ACCOUNTS_FILE")" || die "reading $ACCOUNTS_FILE failed"
+    eval "$assignments"
+}
+
+resolve_selection() {
+    # SELECTION := account (and ACCOUNT) | passthrough | none.
+    local dir="${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}" short="${GWS_ACCOUNT:-}" dir_account=""
+    case "$dir" in
+        "~"*) die "GOOGLE_WORKSPACE_CLI_CONFIG_DIR starts with a literal ~ ('$dir'). A quoted ~ does not expand, and gws would write under ./~ instead. Use \"\$HOME/.config/gws/<account>\"." ;;
+    esac
+    while [[ "$dir" == */ ]]; do
+        dir="${dir%/}"
+    done
+    if [[ -n "$dir" && "${dir%/*}" == "$ACCOUNTS_ROOT" && -f "$ACCOUNTS_FILE" ]]; then
+        validate_accounts
+        if account_listed "${dir##*/}"; then
+            dir_account="${dir##*/}"
+        fi
+    fi
+    if [[ -n "$short" ]]; then
+        case "$short" in
+            */* | . | ..) die "GWS_ACCOUNT must be an account name from $ACCOUNTS_FILE, got '$short'" ;;
+        esac
+        if [[ -z "$dir" || "$dir" == "$ACCOUNTS_ROOT/$short" ]]; then
+            SELECTION=account ACCOUNT="$short"
+            return 0
+        fi
+        if [[ -n "$dir_account" ]]; then
+            die "GWS_ACCOUNT=$short and GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$dir name different accounts. Set only one of them."
+        fi
+        # GOOGLE_WORKSPACE_CLI_CONFIG_DIR names a store outside the accounts,
+        # such as a throwaway store for minting a credential. It wins over an
+        # exported GWS_ACCOUNT default, and no credential is injected.
+        SELECTION=passthrough
+        return 0
+    fi
+    if [[ -n "$dir_account" ]]; then
+        SELECTION=account ACCOUNT="$dir_account"
+    elif [[ -n "$dir" ]]; then
+        SELECTION=passthrough
+    else
+        SELECTION=none
+    fi
+}
+
+reject_unselected_credentials() {
+    local key="$1" tier="$2" name
+    for name in $(compgen -v); do
+        case "$name" in
+            GWS_*_OAUTH) ;;
+            *) continue ;;
+        esac
+        [[ "$name" != "$key" && -n "${!name:-}" ]] || continue
+        die "$name is set, but this call selects account $ACCOUNT, tier $tier, whose credential is $key. Unset $name: the wrapper runs the selected tier's command itself, and GWS_TIER chooses the tier."
+    done
+}
+
+run_materialized() {
+    # Write the credential in $key to a 0600 file in a private directory and run
+    # real gws on it against STORE, the gws config dir that keeps its token
+    # cache. An empty STORE means a private store, removed with the credential.
+    local real_gws="$1" key="$2" store="$3"
+    shift 3
+    local creds_file client_id client_secret rc=0
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf -- "$TMP_DIR"' EXIT
+    creds_file="${TMP_DIR}/credential.json"
+    [[ -n "$store" ]] || store="${TMP_DIR}/store"
+    (umask 077 && printf '%s' "${!key}" >"$creds_file")
+    require_jq
+    client_id="$(jq -r '.client_id // empty' "$creds_file")" || die "$key is not valid JSON"
+    [[ -n "$client_id" ]] || die "$key is missing a non-empty client_id"
+    client_secret="$(jq -r '.client_secret // empty' "$creds_file")" || die "$key is not valid JSON"
+    [[ -n "$client_secret" ]] || die "$key is missing a non-empty client_secret"
+    # GOOGLE_APPLICATION_CREDENTIALS names the same file: without it gws bills
+    # the machine ADC's quota project, and another account's ADC gives a 403
+    # naming that unrelated project.
+    scrub_args
+    GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
+        GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
+        GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
+        GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
+        GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \
+        env "${SCRUB_ARGS[@]}" "$real_gws" "$@" || rc=$?
+    exit "$rc"
+}
+
+run_tier_command() {
+    # Run the tier's command around this wrapper. The re-entered copy touches
+    # the marker before anything else, so a command that never ran gws is told
+    # apart from one that ran it and failed.
+    local tier="$1"
+    shift
+    local self rc=0
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
+    MARKER_DIR="$(mktemp -d)"
+    trap 'rm -rf -- "$MARKER_DIR"' EXIT
+    GWS_ACCOUNTS_REENTRY="${MARKER_DIR}/entered" "${TIER_COMMAND[@]}" "$self" "$@" || rc=$?
+    if [[ ! -e "${MARKER_DIR}/entered" ]]; then
+        if (( rc == 0 )); then
+            die "the $tier tier command for $ACCOUNT exited 0 without running gws: $(printf '%q ' "${TIER_COMMAND[@]}")"
+        fi
+        echo "gws-accounts: the $tier tier command for $ACCOUNT failed (exit $rc) before running gws" >&2
+    fi
+    exit "$rc"
+}
+
+open_first_oauth_url() {
+    # Reads all of gws's output, so tee never writes into a closed pipe, and
+    # opens the first OAuth URL in it. `script` output ends lines in \r, which
+    # [^[:space:]] leaves out of the URL.
+    awk 'found == 0 && match($0, /https:\/\/accounts\.google\.com\/o\/oauth2\/[^[:space:]]+/) {
+            print substr($0, RSTART, RLENGTH); fflush(); found = 1 }' |
+        while IFS= read -r url; do
+            forward open "$url" >/dev/null 2>&1 || true
+        done
+}
+
+run_auth_login_headless() {
+    # `gws auth login` prints its OAuth URL instead of opening a browser, and
+    # ignores $BROWSER. With no display and `forward` on PATH, run it under
+    # `script` for a PTY (its scope picker needs one), tee its output, and hand
+    # the first OAuth URL to `forward open`, which opens it in the laptop's
+    # browser and carries the localhost callback back. Returns without doing
+    # anything for any other call.
+    local real_gws="$1"
+    shift
+    [[ "$(first_arg "$@")" == auth && "$(auth_subcommand "$@")" == login ]] || return 0
+    [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 0
+    command -v forward >/dev/null 2>&1 || return 0
+    command -v script >/dev/null 2>&1 || die "script is not on PATH; it is needed to run gws auth login through forward"
+    scrub_args
+    local -a cmd=(env "${SCRUB_ARGS[@]}" "$real_gws" "$@")
+    if [[ "$(uname -s)" == Darwin ]]; then
+        script -q /dev/null "${cmd[@]}" | tee >(open_first_oauth_url)
+    else
+        script -qefc "$(printf '%q ' "${cmd[@]}")" /dev/null | tee >(open_first_oauth_url)
+    fi
+    exit "${PIPESTATUS[0]}"
+}
+
+main() {
+    local real_gws cmd
+    real_gws="$(find_real_gws)"
+    cmd="$(first_arg "$@")"
+
+    # The caller supplied gws credentials itself, or the call needs none:
+    # `gws schema` reads public discovery documents, and a call with no
+    # subcommand only prints help or the version.
+    if [[ -n "${GOOGLE_WORKSPACE_CLI_TOKEN:-}" || -n "${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}" \
+        || -z "$cmd" || "$cmd" == schema ]]; then
+        exec_real "$real_gws" "$@"
+    fi
+
+    resolve_selection
+    case "$SELECTION" in
+        none)
+            validate_accounts
+            die "no account selected. Set GWS_ACCOUNT=<account> (or GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"\$HOME/.config/gws/<account>\"), and GWS_TIER=<tier> for a tier other than $DEFAULT_TIER. Accounts in $ACCOUNTS_FILE:
+$(list_accounts)"
+            ;;
+        passthrough)
+            [[ -z "${GWS_TIER:-}" ]] || die "GWS_TIER=$GWS_TIER needs an account from $ACCOUNTS_FILE, and GOOGLE_WORKSPACE_CLI_CONFIG_DIR=$GOOGLE_WORKSPACE_CLI_CONFIG_DIR is not one"
+            run_auth_login_headless "$real_gws" "$@"
+            exec_real "$real_gws" "$@"
+            ;;
+    esac
+
+    validate_accounts
+    local tier="${GWS_TIER:-$DEFAULT_TIER}"
+    load_account "$ACCOUNT" "$tier"
+    (( ACCOUNT_KNOWN )) || die "account '$ACCOUNT' is not in $ACCOUNTS_FILE. Accounts:
+$(list_accounts)"
+    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${ACCOUNTS_ROOT}/${ACCOUNT}"
+
+    if [[ "$cmd" == auth ]]; then
+        [[ -z "${GWS_TIER:-}" ]] || die "gws auth manages the login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR; GWS_TIER does not apply to it"
+        if (( HAS_TIERS )) && [[ "$(auth_subcommand "$@")" == login ]]; then
+            die "$ACCOUNT gets its credentials from its tier commands, and a login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR would be used only when this wrapper is bypassed. Mint a tier's credential into a throwaway store instead: GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"\$(mktemp -d)\" gws auth login --scopes <scopes>, then gws auth export --unmasked (the google-workspace skill has the steps)."
+        fi
+        run_auth_login_headless "$real_gws" "$@"
+        exec_real "$real_gws" "$@"
+    fi
+
+    if (( ! HAS_TIERS )); then
+        [[ -z "${GWS_TIER:-}" ]] || die "account $ACCOUNT has no tiers; it runs on the login gws auth login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR. Unset GWS_TIER."
+        exec_real "$real_gws" "$@"
+    fi
+
+    # gws reads a stored login from either file whenever this wrapper is bypassed.
+    local stored
+    for stored in credentials.enc credentials.json; do
+        if [[ -e "${GOOGLE_WORKSPACE_CLI_CONFIG_DIR}/${stored}" ]]; then
+            die "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR holds a stored login ($stored). $ACCOUNT gets its credentials from its tier commands, and real gws would use that login whenever this wrapper is bypassed. Delete it: rm '${GOOGLE_WORKSPACE_CLI_CONFIG_DIR}/${stored}'"
+        fi
+    done
+
+    if (( ! TIER_KNOWN )); then
+        if [[ -z "${GWS_TIER:-}" ]]; then
+            die "account $ACCOUNT has no $DEFAULT_TIER tier, so every call needs GWS_TIER. Tiers:
+$(list_tiers "$ACCOUNT")"
+        fi
+        die "account $ACCOUNT has no tier '$GWS_TIER'. Tiers:
+$(list_tiers "$ACCOUNT")"
+    fi
+
+    local key="GWS_${ACCOUNT_TOKEN}_${TIER_TOKEN}_OAUTH" store=""
+    # The default tier keeps the account's store and its cached access token.
+    # Any other tier runs on a private store: two tiers can share an OAuth
+    # client, and gws would hand one tier the other's cached token.
+    [[ "$tier" != "$DEFAULT_TIER" ]] || store="$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+
+    if [[ -n "${GWS_ACCOUNTS_REENTRY:-}" ]]; then
+        : >"$GWS_ACCOUNTS_REENTRY"
+        [[ -n "${!key:-}" ]] || die "the $tier tier command for $ACCOUNT ran gws without setting $key"
+        run_materialized "$real_gws" "$key" "$store" "$@"
+    fi
+    reject_unselected_credentials "$key" "$tier"
+    if [[ -n "${!key:-}" ]]; then
+        run_materialized "$real_gws" "$key" "$store" "$@"
+    fi
+    run_tier_command "$tier" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
