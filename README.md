@@ -19,7 +19,7 @@ GWS_ACCOUNT=work GWS_TIER=send gws gmail +send --to a@example.com …       # ru
 Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH.
 
 ```bash
-git clone --branch v0.1.0 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
+git clone --branch v0.1.1 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
 export PATH="$HOME/.local/share/gws-accounts/bin:$PATH"    # in your shell profile
 type -a gws                                                 # the wrapper must be listed first
 ```
@@ -31,7 +31,7 @@ Do not install the wrapper as a mise tool next to gws. mise's shims mode puts a 
 The skill installs per agent:
 
 - **Claude Code**: `/plugin marketplace add sjawhar/gws-accounts`, then `/plugin install gws-accounts@gws-accounts`.
-- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.0`. This installs the skill but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
+- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.1`. This installs the skill but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
 
 ## Accounts
 
