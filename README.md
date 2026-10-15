@@ -31,7 +31,7 @@ Do not install the wrapper as a mise tool next to gws. mise's shims mode puts a 
 The skill installs per agent:
 
 - **Claude Code**: `/plugin marketplace add sjawhar/gws-accounts`, then `/plugin install gws-accounts@gws-accounts`.
-- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.0`.
+- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.0`. This installs the skill but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
 
 ## Accounts
 
