@@ -226,6 +226,18 @@ reject_unselected_credentials() {
     [[ -z "$FOREIGN" ]] || die "$FOREIGN is set, but this call selects account $ACCOUNT, tier $tier, whose credential is $key. Unset $FOREIGN: the wrapper runs the selected tier's command itself, and GWS_TIER chooses the tier."
 }
 
+stored_login() {
+    # STORED := the first file in store $1 that gws reads a stored login from, or "".
+    local name
+    STORED=""
+    for name in credentials.enc credentials.json; do
+        if [[ -e "$1/$name" ]]; then
+            STORED="$name"
+            return 0
+        fi
+    done
+}
+
 run_materialized() {
     # Write the credential in $key to a 0600 file in a private directory and run
     # real gws on it against STORE, the gws config dir that keeps its token
@@ -357,16 +369,17 @@ $(list_accounts)"
         [[ -z "${GWS_TIER:-}" ]] || die "account $ACCOUNT has no tiers; it runs on the login gws auth login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR. Unset GWS_TIER."
         foreign_credential ""
         [[ -z "$FOREIGN" ]] || die "$FOREIGN is set, but account $ACCOUNT has no tiers; it runs on the login gws auth login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR, and would ignore that credential. Unset $FOREIGN."
+        stored_login "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+        [[ -n "$STORED" ]] || die "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR holds no stored login (credentials.enc or credentials.json). Account $ACCOUNT has no tiers and runs on that login; without it, real gws would fall back to Application Default Credentials and run the call as another identity. Store the login first: GWS_ACCOUNT=$(printf '%q' "$ACCOUNT") gws auth login"
         exec_real "$real_gws" "$@"
     fi
 
     # gws reads a stored login from either file whenever this wrapper is bypassed.
-    local stored
-    for stored in credentials.enc credentials.json; do
-        if [[ -e "${GOOGLE_WORKSPACE_CLI_CONFIG_DIR}/${stored}" ]]; then
-            die "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR holds a stored login ($stored). $ACCOUNT gets its credentials from its tier commands, and real gws would use that login whenever this wrapper is bypassed. Delete it: rm '${GOOGLE_WORKSPACE_CLI_CONFIG_DIR}/${stored}'"
-        fi
-    done
+    stored_login "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+    if [[ -n "$STORED" ]]; then
+        local stored_path="${GOOGLE_WORKSPACE_CLI_CONFIG_DIR}/${STORED}"
+        die "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR holds a stored login ($STORED). $ACCOUNT gets its credentials from its tier commands, and real gws would use that login whenever this wrapper is bypassed. Move it aside, which keeps it: mv '$stored_path' '$stored_path.pre-gws-accounts'. Or delete it: rm '$stored_path'"
+    fi
 
     if (( ! TIER_KNOWN )); then
         if [[ -z "${GWS_TIER:-}" ]]; then

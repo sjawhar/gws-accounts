@@ -59,7 +59,7 @@ The skill installs per agent:
 ```
 
 - An account's `description`, and each tier's, appear in the wrapper's errors. An agent that calls gws without an account gets the list and picks from it, so say who the account is and what each tier can do.
-- An account **without** `tiers` runs on the login `gws auth login` stored in its directory.
+- An account **without** `tiers` runs on the login `gws auth login` stored in its directory. Until that login exists, the wrapper refuses every call on it except `gws auth` and names the `GWS_ACCOUNT=<name> gws auth login` that creates it, because real gws, finding no login, would fall back to Application Default Credentials and run the call as whatever identity they hold.
 - An account **with** `tiers` gets its credentials only from them. The wrapper refuses to run `gws auth login` for it, and refuses every call except `gws auth` while its directory holds a stored login, because real gws would use that login whenever the wrapper is bypassed.
 
 ### Selecting an account

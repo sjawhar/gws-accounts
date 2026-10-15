@@ -132,6 +132,13 @@ class Routing(unittest.TestCase):
             self.assertIn(needle, result.stderr)
         self.assertNotIn("ARG=", result.stdout)
 
+    def store_login(self, account: str, stored: str = "credentials.enc") -> Path:
+        store = self.gws_root / account
+        store.mkdir(exist_ok=True)
+        path = store / stored
+        path.write_text("x", encoding="utf-8")
+        return path
+
     # Selecting an account
 
     def test_no_account_lists_every_account_and_tier(self):
@@ -264,11 +271,27 @@ class Routing(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_account_without_tiers_runs_on_its_own_store(self):
-        result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(fields(result.stdout)["DIR"], str(self.gws_root / "plain@example.com"))
-        self.assertEqual(fields(result.stdout)["FILE"], "")
-        self.assertNotIn("FETCHED=", result.stderr)
+        for stored in ("credentials.enc", "credentials.json"):
+            with self.subTest(stored=stored):
+                path = self.store_login("plain@example.com", stored)
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"})
+                path.unlink()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(fields(result.stdout)["DIR"], str(self.gws_root / "plain@example.com"))
+                self.assertEqual(fields(result.stdout)["FILE"], "")
+                self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_account_without_tiers_and_no_stored_login_is_loud(self):
+        # Real gws falls back to Application Default Credentials on a store
+        # with no login, which would run the call as another identity.
+        adc = self.stub_dir / "adc.json"
+        adc.write_text(credential("adc"), encoding="utf-8")
+        store = self.gws_root / "plain@example.com"
+        for name, prepare in (("no store", lambda: None), ("empty store", lambda: store.mkdir(exist_ok=True))):
+            with self.subTest(name):
+                prepare()
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GOOGLE_APPLICATION_CREDENTIALS": str(adc)})
+                self.assert_fails(result, str(store), "no stored login", "GWS_ACCOUNT=plain@example.com gws auth login")
 
     def test_tier_on_an_account_without_tiers_is_loud(self):
         self.assert_fails(self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GWS_TIER": "read"}), "has no tiers")
@@ -280,15 +303,14 @@ class Routing(unittest.TestCase):
                 self.assert_fails(result, "gws-accounts: ", key, "has no tiers", str(self.gws_root / "plain@example.com"))
 
     def test_stored_login_in_a_tiered_account_is_loud(self):
-        (self.gws_root / "personal").mkdir()
         for stored in ("credentials.enc", "credentials.json"):
             with self.subTest(stored=stored):
-                path = self.gws_root / "personal" / stored
-                path.write_text("x", encoding="utf-8")
+                path = self.store_login("personal", stored)
                 result = self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")})
-                self.assert_fails(result, stored)
-                self.assertNotIn("FETCHED=", result.stderr)
                 path.unlink()
+                # A deleted credential cannot be restored, so the fix offered first keeps it.
+                self.assert_fails(result, stored, f"mv '{path}' '{path}.pre-gws-accounts'")
+                self.assertNotIn("FETCHED=", result.stderr)
 
     def test_credential_for_an_unselected_tier_or_account_is_loud(self):
         for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_SENDONLY_SEND_OAUTH", "GWS_OTHER_ADMIN_OAUTH"):
