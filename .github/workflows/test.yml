@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  routing:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tool versions
+        run: |
+          /bin/bash --version | head -n 1
+          command -v jq && jq --version
+          command -v script
+      - name: Routing tests
+        run: python3 -m unittest discover -s tests -v
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -s bash -e SC2016 bin/gws
