@@ -289,14 +289,20 @@ run_tier_command() {
 }
 
 open_first_oauth_url() {
-    # Reads all of gws's output, so tee never writes into a closed pipe, and
-    # opens the first OAuth URL in it. `script` output ends lines in \r, which
-    # [^[:space:]] leaves out of the URL.
-    awk 'found == 0 && match($0, /https:\/\/accounts\.google\.com\/o\/oauth2\/[^[:space:]]+/) {
-            print substr($0, RSTART, RLENGTH); fflush(); found = 1 }' |
-        while IFS= read -r url; do
-            forward open "$url" >/dev/null 2>&1 || true
-        done
+    # Opens the first OAuth URL in gws's output as soon as its line arrives,
+    # since gws then waits for the callback (mawk, Ubuntu's awk, buffers its
+    # input and would see the URL only after gws exits), and reads the rest,
+    # so tee never writes into a closed pipe. `script` output ends lines in
+    # \r, which [^[:space:]] leaves out of the URL. forward's stdout (the URL
+    # it hands back on failure) stays out of gws's output; its stderr says why.
+    local line rc=0 re='https://accounts\.google\.com/o/oauth2/[^[:space:]]+'
+    while IFS= read -r line; do
+        [[ "$line" =~ $re ]] || continue
+        forward open "${BASH_REMATCH[0]}" >/dev/null || rc=$?
+        (( rc == 0 )) || echo "gws-accounts: forward open failed (exit $rc); the login cannot complete through forward" >&2
+        break
+    done
+    cat >/dev/null
 }
 
 run_auth_login_headless() {

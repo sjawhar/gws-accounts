@@ -74,7 +74,7 @@ Formatting mistakes in documents people read are recurring and costly. Follow th
 
 `gws auth login` starts a localhost callback server and prints the consent URL. Without a display:
 
-- With `forward` on PATH, the wrapper opens the URL in the laptop's browser through it, and the callback comes back the same way.
+- With `forward` on PATH, the wrapper opens the URL in the laptop's browser through it, and the callback comes back the same way. If forward fails, the wrapper prints forward's error and then `gws-accounts: forward open failed (exit N); the login cannot complete through forward`, and the login waits for a callback that will not come. Stop it, tell the user what forward said, and follow [references/auth-login.md](references/auth-login.md) instead.
 - Otherwise, follow [references/auth-login.md](references/auth-login.md): run the login in the background, give the user the URL, and poll. A foreground login dies with your command timeout, and the URL then leads nowhere.
 
 To undo a login into the wrong store, delete that store's files. Do not revoke the grant at Google: Google may revoke every token issued under the same grant (RFC 7009 permits it), taking the stored credentials for that client and account with it.

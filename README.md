@@ -89,7 +89,7 @@ The [skill](skills/google-workspace/SKILL.md) shows how to mint a credential for
 
 ## Logging in with no display
 
-`gws auth login` prints a consent URL and waits for a redirect to `127.0.0.1`. On a machine with no display, when [forward](https://github.com/sjawhar/forward) is on PATH, the wrapper hands the URL to `forward open`, which opens it in the laptop's browser and carries the redirect back. Without forward, run the login in the background and give the user the URL: [the skill's reference](skills/google-workspace/references/auth-login.md) has the steps.
+`gws auth login` prints a consent URL and waits for a redirect to `127.0.0.1`. On a machine with no display, when [forward](https://github.com/sjawhar/forward) is on PATH, the wrapper hands the URL to `forward open`, which opens it in the laptop's browser and carries the redirect back. When `forward open` fails, the wrapper prints forward's error and then `gws-accounts: forward open failed (exit N); the login cannot complete through forward` to stderr, and the login waits for a redirect that will not come: stop it, fix forward, or log in without it. Without forward, run the login in the background and give the user the URL: [the skill's reference](skills/google-workspace/references/auth-login.md) has the steps.
 
 ## With gws-multi-account
 

@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -410,11 +409,6 @@ class Routing(unittest.TestCase):
 
     # Headless gws auth login through forward
 
-    def wait_for(self, path: Path, timeout: float = 3.0) -> None:
-        deadline = time.monotonic() + timeout
-        while not path.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-
     def test_headless_login_hands_the_oauth_url_to_forward(self):
         url = "https://accounts.google.com/o/oauth2/auth?x=1&redirect_uri=http://localhost:4321"
         selectors = ({"GWS_ACCOUNT": "plain@example.com"}, {"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/tmp/mint-store"})
@@ -424,22 +418,51 @@ class Routing(unittest.TestCase):
                     received = self.stub_dir / f"forward-{len(selector)}-{exit_code}"
                     received.unlink(missing_ok=True)
                     write_stub(self.stub_dir, "forward", f'printf %s "$2" > "{received}"')
-                    write_stub(self.stub_dir, "gws", f'echo "Open this URL: {url}"\nexit {exit_code}')
+                    # Like gws auth login waiting for its callback, the stub
+                    # keeps running until forward has the URL, or 5 seconds.
+                    write_stub(self.stub_dir, "gws", f'''echo "Open this URL: {url}"
+for ((i = 0; i < 50; i++)); do [ -e "{received}" ] && break; sleep 0.1; done
+[ -e "{received}" ] && echo "FORWARDED=while-gws-ran" || echo "FORWARDED=not-while-gws-ran"
+exit {exit_code}''')
                     result = self.run_gws(selector, args=["auth", "login"])
                     self.assertEqual(result.returncode, exit_code, result.stderr)
-                    self.wait_for(received)
+                    self.assertIn("FORWARDED=while-gws-ran", result.stdout)
                     self.assertEqual(received.read_text(), url)
 
+    def test_headless_login_reports_a_failed_forward(self):
+        url = "https://accounts.google.com/o/oauth2/auth?x=1&redirect_uri=http://localhost:4321"
+        # forward prints the URL it could not deliver to stdout, and why to stderr.
+        write_stub(self.stub_dir, "forward", 'echo "$2"; echo "forward: the opener channel is down" >&2; exit 5')
+        write_stub(self.stub_dir, "gws", f'echo "Open this URL: {url}"')
+        result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gws-accounts: forward open failed (exit 5); the login cannot complete through forward\n", result.stderr)
+        self.assertIn("forward: the opener channel is down", result.stderr)
+        self.assertEqual(result.stdout.count(url), 1, result.stdout)
+
     def test_login_with_a_display_or_without_forward_runs_plain(self):
-        write_stub(self.stub_dir, "forward", "echo SHOULD-NOT-RUN >&2; exit 1")
+        url = "https://accounts.google.com/o/oauth2/auth?x=1&redirect_uri=http://localhost:4321"
+        ran = self.stub_dir / "forward-ran"
+        write_stub(self.stub_dir, "forward", f': > "{ran}"')
+        write_stub(self.stub_dir, "gws", f'echo "Open this URL: {url}"\n{STUB_GWS}')
+        # Control: these stubs reach forward when nothing stops them.
+        result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(ran.exists(), "the stub forward never ran without a display")
+        ran.unlink()
         for env, args in (
             ({"DISPLAY": ":0"}, ["auth", "login"]),
+            ({"WAYLAND_DISPLAY": "wayland-0"}, ["auth", "login"]),
+            ({"MIR_SOCKET": "/run/mir_socket"}, ["auth", "login"]),
             ({}, ["auth", "status"]),
         ):
             with self.subTest(env=env, args=args):
                 result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", **env}, args=args)
+                forwarded = ran.exists()
+                ran.unlink(missing_ok=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+                self.assertIn(f"ARG={args[1]}", result.stdout)
+                self.assertFalse(forwarded, f"forward ran with {env or 'no display'} for {args}")
         (self.stub_dir / "forward").unlink()
         result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "login"])
         self.assertEqual(result.returncode, 0, result.stderr)
