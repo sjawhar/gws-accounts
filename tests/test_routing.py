@@ -273,6 +273,12 @@ class Routing(unittest.TestCase):
     def test_tier_on_an_account_without_tiers_is_loud(self):
         self.assert_fails(self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GWS_TIER": "read"}), "has no tiers")
 
+    def test_credential_on_an_account_without_tiers_is_loud(self):
+        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_PLAIN_EXAMPLE_COM_READ_OAUTH"):
+            with self.subTest(key=key):
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: credential("other")})
+                self.assert_fails(result, "gws-accounts: ", key, "has no tiers", str(self.gws_root / "plain@example.com"))
+
     def test_stored_login_in_a_tiered_account_is_loud(self):
         (self.gws_root / "personal").mkdir()
         for stored in ("credentials.enc", "credentials.json"):

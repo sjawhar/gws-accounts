@@ -205,16 +205,25 @@ resolve_selection() {
     fi
 }
 
-reject_unselected_credentials() {
-    local key="$1" tier="$2" name
+foreign_credential() {
+    # FOREIGN := the first non-empty GWS_*_OAUTH variable other than $1, or "".
+    local key="$1" name
+    FOREIGN=""
     for name in $(compgen -v); do
         case "$name" in
             GWS_*_OAUTH) ;;
             *) continue ;;
         esac
         [[ "$name" != "$key" && -n "${!name:-}" ]] || continue
-        die "$name is set, but this call selects account $ACCOUNT, tier $tier, whose credential is $key. Unset $name: the wrapper runs the selected tier's command itself, and GWS_TIER chooses the tier."
+        FOREIGN="$name"
+        return 0
     done
+}
+
+reject_unselected_credentials() {
+    local key="$1" tier="$2"
+    foreign_credential "$key"
+    [[ -z "$FOREIGN" ]] || die "$FOREIGN is set, but this call selects account $ACCOUNT, tier $tier, whose credential is $key. Unset $FOREIGN: the wrapper runs the selected tier's command itself, and GWS_TIER chooses the tier."
 }
 
 run_materialized() {
@@ -346,6 +355,8 @@ $(list_accounts)"
 
     if (( ! HAS_TIERS )); then
         [[ -z "${GWS_TIER:-}" ]] || die "account $ACCOUNT has no tiers; it runs on the login gws auth login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR. Unset GWS_TIER."
+        foreign_credential ""
+        [[ -z "$FOREIGN" ]] || die "$FOREIGN is set, but account $ACCOUNT has no tiers; it runs on the login gws auth login stored in $GOOGLE_WORKSPACE_CLI_CONFIG_DIR, and would ignore that credential. Unset $FOREIGN."
         exec_real "$real_gws" "$@"
     fi
 
