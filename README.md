@@ -31,7 +31,7 @@ Do not install the wrapper as a mise tool next to gws. mise's shims mode puts a 
 The skill installs per agent:
 
 - **Claude Code**: `/plugin marketplace add sjawhar/gws-accounts`, then `/plugin install gws-accounts@gws-accounts`.
-- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.3`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks an `omp` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
+- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.3`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks both an `omp` field and the legacy `pi` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
 
 ## Accounts
 
@@ -73,7 +73,7 @@ A call selects an account the way gws selects a store: `GOOGLE_WORKSPACE_CLI_CON
 
 `GWS_TIER=<tier>` selects a tier; unset means `read`. An account with no `read` tier needs `GWS_TIER` on every call except `gws auth`, which takes none.
 
-A tier's `command` is an argv array. The wrapper appends itself and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to an `authorized_user` JSON credential: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). The command is not run through a shell, so `~` and `$HOME` do not expand in it.
+A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to an `authorized_user` JSON credential: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). The command is not run through a shell, so `~` and `$HOME` do not expand in it.
 
 Any secret runner works: [secretsd](https://github.com/sjawhar/forward)'s `secrets KEY --`, 1Password's `op run --env-file FILE --`, `sops exec-env`, or a script of your own. A plain file, for example:
 

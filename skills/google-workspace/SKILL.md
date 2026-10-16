@@ -1,25 +1,28 @@
 ---
 name: google-workspace
-description: Use when reading, searching, uploading, downloading, sharing, or organizing Google Drive files; reading or editing Google Docs, Sheets, or Slides; reading Calendar; sending or changing Gmail with gws (`gws gmail +send`, `+reply`, labels, drafts); or calling a Google Workspace API gws lacks, such as the Admin SDK Directory. Covers choosing an account and credential tier (GWS_ACCOUNT, GWS_TIER, ~/.config/gws/accounts.json), gws auth login with no display, and minting a credential for a tier. Triggers on "google drive", "gdrive", "google docs", "google sheets", "workspace", drive.google.com or docs.google.com URLs, Drive file IDs, and requests to find, list, export, share, or manage documents, spreadsheets, and slides.
+description: Use when running gws; reading, searching, sending, or changing Gmail; reading, searching, uploading, downloading, sharing, or organizing Google Drive files; reading or editing Google Docs, Sheets, or Slides; reading Calendar; or calling a Google Workspace API gws lacks, such as the Admin SDK Directory. Covers choosing an account and credential tier (GWS_ACCOUNT, GWS_TIER, ~/.config/gws/accounts.json), gws auth login with no display, and minting a credential for a tier. Triggers on "gws", "gmail", "read Gmail", "search Gmail", "google drive", "gdrive", "google docs", "google sheets", "workspace", drive.google.com or docs.google.com URLs, Drive file IDs, and requests to find, list, export, share, or manage documents, spreadsheets, and slides.
 ---
 
 # Google Workspace (gws)
 
-`gws` ([googleworkspace/cli](https://github.com/googleworkspace/cli)) calls every Workspace API and prints JSON. This skill runs it through the gws-accounts wrapper, installed ahead of it on PATH: every call names an account, and the account's tier decides which credential the call runs on. Real gws ignores `GWS_ACCOUNT` and `GWS_TIER` and runs every call on its default store, so run the check below before any other call. gws has no MCP server mode; the CLI is the only path.
+`gws` ([googleworkspace/cli](https://github.com/googleworkspace/cli)) calls every Workspace API and prints JSON. This skill runs it through the gws-accounts wrapper, installed ahead of it on PATH: every call names an account, and the account's tier decides which credential the call runs on. Real gws ignores `GWS_ACCOUNT` and `GWS_TIER`, but honors `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` to select its store, so run the check below before any other call. gws has no MCP server mode; the CLI is the only path.
 
 ## Choose an account and a tier
 
 `~/.config/gws/accounts.json` lists the accounts. Before the first call, check what calls will run on:
 
 ```bash
-for v in GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR; do [ -z "$(printenv "$v")" ] || echo "$v is set"; done
-env -u GWS_ACCOUNT gws drive about get
+preflight_failed=0
+for v in GWS_TIER GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR; do
+  if printenv "$v" >/dev/null; then echo "$v is set"; preflight_failed=1; fi
+done
+[ "$preflight_failed" -eq 0 ] && env -u GWS_ACCOUNT gws drive about get
 ```
 
-- `<variable> is set`, whatever gws printed: that exported variable overrides account selection, and a call could run on its store or credential instead of the account it names. Stop and tell the user which variable is set and that it overrides account selection.
+- `<variable> is set`: an exported `GWS_TIER` changes the tier that a later call omitting it would use; `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` selects gws's store; and `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` makes the wrapper pass the call through. Stop and tell the user which variable is set and how it changes the call before clearing it. The check does not call gws while any of them is set.
 - `gws-accounts: no account selected`, followed by every account and tier with its description: the wrapper is in place. Pick an account from those descriptions. Never invent an account, and when the user's words fit more than one, ask.
 - Any other `gws-accounts:` error: the wrapper is in place but its setup is not (a missing `accounts.json`, for one). Stop and tell the user what it says.
-- Anything else, success included: `gws` on PATH is not the wrapper, and every call below would run on real gws's default store, whatever account it names. Stop, run `type -a gws`, and tell the user the gws-accounts wrapper is not first on PATH.
+- Anything else, success included: `gws` on PATH is not the wrapper. A call selected with `GWS_ACCOUNT` would run on real gws's default store, because real gws ignores `GWS_ACCOUNT`; `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` still selects the store it names. Stop, run `type -a gws`, and tell the user the gws-accounts wrapper is not first on PATH.
 
 ```bash
 GWS_ACCOUNT=personal gws drive files list --params '{"pageSize": 10}'
@@ -30,7 +33,7 @@ GWS_ACCOUNT=personal GWS_TIER=send gws gmail +send --to a@example.com --subject 
 - `GWS_TIER` picks the credential. Unset means `read`. The usual tiers are `read` (Drive, Docs, Sheets, Slides, Calendar, and Gmail read-only), `modify` (Gmail labels, archive, drafts, `+reply`, `+forward`) and `send` (`+send` alone; a `gmail.send` credential cannot read mail, so `+reply` fails under it with `insufficient authentication scopes`). The account's descriptions in the error say what each of its tiers grants.
 - A tier's description may say that releasing its credential needs a human: a hardware-key touch, a biometric prompt. Tell the human which account and tier you are about to use before the call, run such calls one at a time, and front-load them before any long unattended work.
 - An account without tiers runs on the login `gws auth login` stored in its directory. `GWS_TIER` on it is an error. Until that login exists, every call on it except `gws auth` fails with `holds no stored login`; the login is `GWS_ACCOUNT=<account> gws auth login`, which needs the user to consent in a browser (gws auth, below).
-- Never set a `GWS_*_OAUTH` variable yourself. The wrapper runs the tier's command, which injects it, and, except for `gws auth`, refuses a call that carries one for a tier or account it did not select.
+- Never set a `GWS_*_OAUTH` variable yourself. The wrapper runs the tier's command, which injects it, and, except for `gws auth`, refuses a call on an account that carries one for a tier or account it did not select.
 
 `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` pointing anywhere outside `~/.config/gws/<account>` runs gws on that store with no credential injected. That is how minting works (below). `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` set by the caller bypass account selection entirely.
 

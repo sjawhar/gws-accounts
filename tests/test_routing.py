@@ -164,6 +164,14 @@ class Routing(unittest.TestCase):
             self.assertIn(needle, result.stderr)
         self.assertNotIn("ARG=", result.stdout)
 
+    def assert_rejected_before_gws_or_secrets(self, result, exit_status: int, *needles: str) -> None:
+        self.assertEqual(result.returncode, exit_status, result.stderr)
+        self.assertIn("gws-accounts:", result.stderr)
+        for needle in needles:
+            self.assertIn(needle, result.stderr)
+        self.assertNotIn("ARG=", result.stdout)
+        self.assertNotIn("FETCHED=", result.stderr)
+
     def store_login(self, account: str, stored: str = "credentials.enc") -> Path:
         store = self.gws_root / account
         store.mkdir(exist_ok=True)
@@ -178,6 +186,14 @@ class Routing(unittest.TestCase):
         self.assert_fails(result, "no account selected", "personal: Personal Gmail", "GWS_TIER=send: gmail.send only",
                           "work@example.com", "sendonly", "plain@example.com")
         self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_invalid_gws_account_name_is_rejected_before_gws_or_secrets(self):
+        for account in ("a/b", ".", ".."):
+            with self.subTest(account=account):
+                result = self.run_gws({"GWS_ACCOUNT": account})
+                self.assert_rejected_before_gws_or_secrets(
+                    result, 1, "GWS_ACCOUNT must be an account name", f"got '{account}'"
+                )
 
     def test_shorthand_and_config_dir_naming_different_accounts_is_loud(self):
         result = self.run_gws({"GWS_ACCOUNT": "personal", "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(self.gws_root / "sendonly")})
@@ -199,6 +215,11 @@ class Routing(unittest.TestCase):
 
     def test_unknown_account_lists_accounts(self):
         self.assert_fails(self.run_gws({"GWS_ACCOUNT": "work"}), "account 'work' is not in", "personal")
+
+    def test_unlisted_gws_account_directory_is_rejected_before_gws_or_secrets(self):
+        (self.gws_root / "unlisted").mkdir()
+        result = self.run_gws({"GWS_ACCOUNT": "unlisted"})
+        self.assert_rejected_before_gws_or_secrets(result, 1, "account 'unlisted' is not in")
 
     def test_shorthand_and_config_dir_select_the_same_account(self):
         selectors = (
@@ -235,13 +256,16 @@ class Routing(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FETCHED=GWS_WORK_EXAMPLE_COM_READ_OAUTH", result.stderr)
 
-    def test_invalid_accounts_file_is_loud(self):
+    def test_invalid_accounts_file_is_rejected_before_gws_or_secrets(self):
         cases = {
             "not json": ("{", "not valid JSON"),
+            "top level array": ([], "must be a JSON object keyed by account name"),
             "command is a string": ({"a": {"tiers": {"read": {"command": "secrets X --"}}}}, "command must be a non-empty array"),
             "unknown tier field": ({"a": {"tiers": {"read": {"command": ["x"], "scopes": []}}}}, 'unknown field "scopes"'),
             "empty tiers": ({"a": {"tiers": {}}}, "tiers must be a non-empty object"),
             "slash in name": ({"a/b": {}}, "is not a directory name"),
+            "non-string account description": ({"a": {"description": ["not", "a", "string"]}}, "description must be a string"),
+            "invalid tier name": ({"a": {"tiers": {"read!": {"command": ["x"]}}}}, 'tier name "read!" must match'),
             "same account token": ({"a.b": {"tiers": {"read": {"command": ["x"]}}}, "a_b": {"tiers": {"send": {"command": ["x"]}}}},
                                    'accounts "a.b" and "a_b" both map to A_B'),
             "same credential variable": ({"a_b": {"tiers": {"c": {"command": ["x"]}}}, "a": {"tiers": {"b_c": {"command": ["x"]}}}},
@@ -250,7 +274,16 @@ class Routing(unittest.TestCase):
         for name, (accounts, needle) in cases.items():
             with self.subTest(name):
                 self.write_accounts(accounts)
-                self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), needle)
+                self.assert_rejected_before_gws_or_secrets(self.run_gws({"GWS_ACCOUNT": "a"}), 1, needle)
+
+    def test_missing_jq_is_rejected_before_gws_or_secrets(self):
+        (self.stub_dir / "jq").unlink()
+        for name in ("bash", "head", "tr"):
+            target = shutil.which(name, path="/usr/bin:/bin")
+            self.assertIsNotNone(target, f"the test host needs {name}")
+            (self.stub_dir / name).symlink_to(target)
+        result = self.run_gws({"PATH": str(self.stub_dir), "GWS_ACCOUNT": "personal"})
+        self.assert_rejected_before_gws_or_secrets(result, 127, "jq is not on PATH")
 
     # Tiers
 
@@ -375,6 +408,11 @@ class Routing(unittest.TestCase):
     def test_credential_without_client_id_is_loud(self):
         bad = json.dumps({"type": "authorized_user", "client_secret": "s", "refresh_token": "r"})
         self.assert_fails(self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": bad}), "client_id")
+
+    def test_credential_without_client_secret_is_rejected_before_gws_or_secrets(self):
+        bad = json.dumps({"type": "authorized_user", "client_id": "id", "refresh_token": "r"})
+        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_PERSONAL_READ_OAUTH": bad})
+        self.assert_rejected_before_gws_or_secrets(result, 1, "GWS_PERSONAL_READ_OAUTH is missing a non-empty client_secret")
 
     def test_argument_with_spaces_survives_the_tier_command(self):
         result = self.run_gws(
