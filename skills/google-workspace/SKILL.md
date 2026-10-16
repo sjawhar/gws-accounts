@@ -14,8 +14,7 @@ description: Use when running gws; reading, searching, sending, or changing Gmai
 ```bash
 preflight_failed=0
 for v in GWS_TIER GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR; do
-  eval "value=\${$v-}"
-  if [ -n "$value" ]; then echo "$v is set to a value"; preflight_failed=1; fi
+  if [ "$(printenv "$v" | wc -c)" -gt 1 ]; then echo "$v is set to a value"; preflight_failed=1; fi
 done
 [ "$preflight_failed" -eq 0 ] && env -u GWS_ACCOUNT gws drive about get
 ```
