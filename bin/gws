@@ -59,34 +59,60 @@ is_wrapper() {
     [[ "$head_bytes" == *gws-accounts-wrapper* ]]
 }
 
+# A gws that hands the call to the first gws on PATH re-enters this wrapper in
+# the same pid: mise's shim does, when mise has no gws version for the
+# directory (a relocated HOME or XDG_CONFIG_HOME hides mise's global config),
+# and this wrapper is that first gws. GWS_ACCOUNTS_HANDED ("<pid> <gws>:<gws>…")
+# names every gws this wrapper handed the call to in that pid, and main reads
+# them into HANDED; the lookup skips each one, and any path to the same file
+# (every shim of one mise), so the call reaches the gws past them or fails,
+# instead of the two exec'ing each other forever.
+HANDED=""
+
+handed_back() {
+    local IFS=':'
+    local gws
+    for gws in $HANDED; do
+        [[ -n "$gws" && "$1" -ef "$gws" ]] && return 0
+    done
+    return 1
+}
+
 find_real_gws() {
     local candidate
     while IFS= read -r candidate; do
         is_wrapper "$candidate" && continue
+        handed_back "$candidate" && continue
         printf '%s\n' "$candidate"
         return 0
     done < <(type -ap gws)
-    echo "gws-accounts: the real gws is not on PATH (npm install -g @googleworkspace/cli)" >&2
+    echo "gws-accounts: the real gws is not on PATH (npm install -g @googleworkspace/cli)${HANDED:+; ${HANDED//:/, } handed the call back to this wrapper, as a mise shim does when mise has no gws version for the directory}" >&2
     return 127
 }
 
-scrub_args() {
-    # SCRUB_ARGS := `-u NAME` for the re-entry marker and every GWS_*_OAUTH
-    # variable: a credential reaches real gws as a 0600 file and no other way.
-    SCRUB_ARGS=(-u GWS_ACCOUNTS_REENTRY)
-    local name
+real_command() {
+    # REAL_COMMAND := real gws $1 behind env, which drops the re-entry marker
+    # and every GWS_*_OAUTH variable (a credential reaches real gws as a 0600
+    # file and no other way), and sh, which names the pid real gws runs in as
+    # handed the call. That pid is this wrapper's for an exec and a child's
+    # otherwise; sh knows its own where bash 3.2 has no $BASHPID, and its exec
+    # keeps it.
+    local real_gws="$1" name
+    REAL_COMMAND=(env -u GWS_ACCOUNTS_REENTRY)
     for name in $(compgen -v); do
         case "$name" in
-            GWS_*_OAUTH) SCRUB_ARGS+=(-u "$name") ;;
+            GWS_*_OAUTH) REAL_COMMAND+=(-u "$name") ;;
         esac
     done
+    REAL_COMMAND+=(/bin/sh -c 'GWS_ACCOUNTS_HANDED="$$ $0"; export GWS_ACCOUNTS_HANDED; exec "$@"'
+        "${HANDED:+$HANDED:}$real_gws" "$real_gws")
 }
 
 exec_real() {
     local real_gws="$1"
     shift
-    scrub_args
-    exec env "${SCRUB_ARGS[@]}" "$real_gws" "$@"
+    real_command "$real_gws"
+    exec "${REAL_COMMAND[@]}" "$@"
 }
 
 # gws parses its first non-flag argument as the service (`gws --format json
@@ -258,13 +284,13 @@ run_materialized() {
     # GOOGLE_APPLICATION_CREDENTIALS names the same file: without it gws bills
     # the machine ADC's quota project, and another account's ADC gives a 403
     # naming that unrelated project.
-    scrub_args
+    real_command "$real_gws"
     GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
         GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \
-        env "${SCRUB_ARGS[@]}" "$real_gws" "$@" || rc=$?
+        "${REAL_COMMAND[@]}" "$@" || rc=$?
     exit "$rc"
 }
 
@@ -318,8 +344,8 @@ run_auth_login_headless() {
     [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 0
     command -v forward >/dev/null 2>&1 || return 0
     command -v script >/dev/null 2>&1 || die "script is not on PATH; it is needed to run gws auth login through forward"
-    scrub_args
-    local -a cmd=(env "${SCRUB_ARGS[@]}" "$real_gws" "$@")
+    real_command "$real_gws"
+    local -a cmd=("${REAL_COMMAND[@]}" "$@")
     if [[ "$(uname -s)" == Darwin ]]; then
         script -q /dev/null "${cmd[@]}" | tee >(open_first_oauth_url)
     else
@@ -329,7 +355,9 @@ run_auth_login_headless() {
 }
 
 main() {
-    local real_gws cmd
+    local real_gws cmd handed_pid handed_list
+    read -r handed_pid handed_list <<< "${GWS_ACCOUNTS_HANDED:-}" || true
+    [[ "$handed_pid" != "$$" ]] || HANDED="$handed_list"
     real_gws="$(find_real_gws)"
     cmd="$(first_arg "$@")"
 

@@ -11,6 +11,7 @@ and /bin only, so on macOS the wrapper runs under the system bash 3.2.
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -47,6 +48,18 @@ if [ -z "${!value_var:-}" ]; then echo "fake-secrets: no value for $key" >&2; ex
 export "$key=${!value_var}"
 exec "$@"
 """
+
+# What mise's shim does when mise has no gws version for the directory (a relocated HOME or
+# XDG_CONFIG_HOME hides mise's global config): exec the first gws on PATH outside its own
+# directory, which is this wrapper when it is installed ahead of mise's shims.
+HAND_BACK = r"""own="${BASH_SOURCE[0]%/*}"
+IFS=':'
+for d in $PATH; do
+    [[ "$d" -ef "$own" ]] && continue
+    [[ -x "$d/gws" ]] && exec "$d/gws" "$@"
+done
+echo "hand-back: no gws on PATH" >&2
+exit 127"""
 
 
 def secrets_cmd(key: str) -> list[str]:
@@ -117,13 +130,33 @@ class Routing(unittest.TestCase):
         (self.gws_root / "accounts.json").write_text(text, encoding="utf-8")
 
     def run_gws(self, env=None, args=None) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        # A session of its own, so a wrapper that loops fails the test at the timeout and leaves
+        # no process behind, even where the loop runs in a child of the wrapper.
+        proc = subprocess.Popen(
             [str(WRAPPER), *(args if args is not None else ["drive", "files", "list"])],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env={**self.env, **(env or {})},
-            timeout=30,
+            start_new_session=True,
         )
+        try:
+            out, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+    def hand_back_path(self, *after) -> str:
+        """PATH with a copy of this wrapper first, then a gws that hands every call back to it."""
+        copy_dir = self.stub_dir.parent / "copy"
+        copy_dir.mkdir()
+        shutil.copy(WRAPPER, copy_dir / "gws")
+        self.hand_back_dir = self.stub_dir.parent / "hand-back"
+        self.hand_back_dir.mkdir()
+        write_stub(self.hand_back_dir, "gws", HAND_BACK)
+        return ":".join(map(str, [copy_dir, self.hand_back_dir, *after]))
 
     def assert_fails(self, result, *needles: str) -> None:
         self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -388,6 +421,27 @@ class Routing(unittest.TestCase):
         result = self.run_gws({"GOOGLE_WORKSPACE_CLI_TOKEN": "t"})
         self.assertEqual(result.returncode, 127)
         self.assertIn("real gws is not on PATH", result.stderr)
+
+    def test_a_gws_that_hands_the_call_back_is_skipped_for_the_gws_past_it(self):
+        path = self.hand_back_path(self.stub_dir, "/usr/bin", "/bin")
+        result = self.run_gws({"PATH": path, "GOOGLE_WORKSPACE_CLI_TOKEN": "t"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fields(result.stdout)["TOKEN"], "t")
+
+    def test_a_tier_call_through_a_gws_that_hands_it_back_reaches_the_gws_past_it(self):
+        # A tier call runs real gws in a child of the wrapper, not in the wrapper's own pid.
+        path = self.hand_back_path(self.stub_dir, "/usr/bin", "/bin")
+        result = self.run_gws({"PATH": path, "GWS_ACCOUNT": "personal",
+                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"id": "personal-read"', result.stdout)
+        self.assertNotIn("LEAKED=", result.stdout)
+
+    def test_when_every_gws_hands_the_call_back_the_wrapper_fails_instead_of_looping(self):
+        path = self.hand_back_path("/usr/bin", "/bin")
+        result = self.run_gws({"PATH": path, "GOOGLE_WORKSPACE_CLI_TOKEN": "t"})
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn(f"{self.hand_back_dir / 'gws'} handed the call back", result.stderr)
 
     # gws auth
 

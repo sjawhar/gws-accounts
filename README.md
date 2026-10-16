@@ -16,7 +16,7 @@ GWS_ACCOUNT=work GWS_TIER=send gws gmail +send --to a@example.com …       # ru
 
 ## Install
 
-Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH.
+Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH, and every gws that hands the call straight back to it, as mise's gws shim does when mise has no gws version for the directory; with nothing left, it exits 127 instead of looping.
 
 ```bash
 git clone --branch v0.1.2 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
