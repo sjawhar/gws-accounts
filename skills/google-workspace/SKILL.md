@@ -14,12 +14,12 @@ description: Use when running gws; reading, searching, sending, or changing Gmai
 ```bash
 preflight_failed=0
 for v in GWS_TIER GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR; do
-  if printenv "$v" >/dev/null; then echo "$v is set"; preflight_failed=1; fi
+  if [ -n "$(printenv "$v")" ]; then echo "$v is set to a value"; preflight_failed=1; fi
 done
 [ "$preflight_failed" -eq 0 ] && env -u GWS_ACCOUNT gws drive about get
 ```
 
-- `<variable> is set`: an exported `GWS_TIER` changes the tier that a later call omitting it would use; `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` selects gws's store; and `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` makes the wrapper pass the call through. Stop and tell the user which variable is set and how it changes the call before clearing it. The check does not call gws while any of them is set.
+- `<variable> is set to a value`: an exported `GWS_TIER` changes the tier that a later call omitting it would use; `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` selects gws's store; and `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` makes the wrapper pass the call through. Stop and tell the user which variable is set and how it changes the call before clearing it. The check does not call gws while any of them is set to a value.
 - `gws-accounts: no account selected`, followed by every account and tier with its description: the wrapper is in place. Pick an account from those descriptions. Never invent an account, and when the user's words fit more than one, ask.
 - Any other `gws-accounts:` error: the wrapper is in place but its setup is not (a missing `accounts.json`, for one). Stop and tell the user what it says.
 - Anything else, success included: `gws` on PATH is not the wrapper. A call selected with `GWS_ACCOUNT` would run on real gws's default store, because real gws ignores `GWS_ACCOUNT`; `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` still selects the store it names. Stop, run `type -a gws`, and tell the user the gws-accounts wrapper is not first on PATH.
