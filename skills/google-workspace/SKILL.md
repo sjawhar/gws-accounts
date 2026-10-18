@@ -37,7 +37,7 @@ GWS_ACCOUNT=personal GWS_TIER=send gws gmail +send --to a@example.com --subject 
 
 `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` pointing anywhere outside `~/.config/gws/<account>` runs gws on that store with no credential injected. That is how minting works (below). `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` set by the caller bypass account selection entirely.
 
-If a `403 Caller does not have required permission to use project ...` names a project unrelated to the account, Application Default Credentials supplied that machine's quota project. The credential is fine.
+A `403 Caller does not have required permission to use project <project>` means gws sent `<project>` as the call's quota project and the account may not use that project. The credential is fine. gws takes the quota project from the first of: `GOOGLE_WORKSPACE_PROJECT_ID`; `installed.project_id` in `client_secret.json` in the store gws runs on (`~/.config/gws/<account>` for the read tier; `gws auth setup` and the console's client download both write it, so an OAuth client shared from someone else's project names their project); the `quota_project_id` of Application Default Credentials. Clear the source that names `<project>`: unset `GOOGLE_WORKSPACE_PROJECT_ID`, or set `installed.project_id` to `""` (keep the key: gws ignores a `client_secret.json` without it, and `gws auth login` then finds no OAuth client). If no later source supplies a quota project, Drive and Gmail calls run without one. If the retry names the Application Default Credentials' project, or that is the source, have the project's owner grant the account `roles/serviceusage.serviceUsageConsumer` on it rather than changing a setting other tools share.
 
 ## stdout is pure JSON; never merge stderr into it
 
@@ -95,7 +95,7 @@ GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth export --unmasked | jq -c . | 
 rm -rf "$store"
 ```
 
-- Pass the client through the environment: gws ignores a hand-built `client_secret.json`.
+- Pass the client through the environment. gws also reads a `client_secret.json` in the console's download format, but ignores one missing a required field (`installed.client_id`, `client_secret`, `project_id`, `auth_uri`, or `token_uri`).
 - The consent page names the OAuth client's app, not the account. Tell the human which Google account to choose before they open it.
 - `gws auth login` always adds `openid` and the `userinfo` scopes. If a consumer needs a credential with exactly one scope, mint it with a tool that requests only the scopes given.
 - Pipe the value into the store. Never put it in argv, a file you leave behind, or the transcript.
