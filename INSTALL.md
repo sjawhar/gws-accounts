@@ -6,17 +6,31 @@ The goal: for every Google account the person names, `GWS_ACCOUNT=<name> gws dri
 
 Never print a credential: no client secret, refresh token or access token, and never the contents of `client_secret.json` or `credentials.*`.
 
-The [README](README.md) describes how the wrapper behaves. Once step 3 has cloned the repository, the same files are on disk under `~/.local/share/gws-accounts/`, and later steps refer to them there.
+The [README](README.md) describes how the wrapper behaves. Once step 3 has cloned the repository, the README, skill and reference this guide links to are on disk under `~/.local/share/gws-accounts/`, and later steps refer to them there.
 
 ## 1. Ask once
 
-Ask the person these questions in one message, then work without asking again until step 7 needs their browser:
+First look at what an earlier gws left, without printing any file's contents:
 
-1. Which Google accounts to set up. For each one: a short name, such as `work` or `personal`, which becomes `GWS_ACCOUNT=<name>` and the directory `~/.config/gws/<name>/`, and its email address.
+```bash
+ls -la ~/.config/gws 2>/dev/null
+jq -r 'keys[]' ~/.config/gws/accounts.json 2>/dev/null
+env | grep -oE '^GOOGLE_WORKSPACE_CLI_[A-Z_]+'
+```
+
+- Every name in `accounts.json`, and every directory in `~/.config/gws` (gws keeps its own `cache` there), is taken: step 5 leaves those alone.
+- `client_secret.json` in `~/.config/gws` is a Desktop client gws already uses: offer it as the answer to question 2.
+- `credentials.enc` or `credentials.json` in `~/.config/gws` is an earlier login. The wrapper never uses it, but gws does whenever the wrapper is bypassed, with whatever scopes it was granted: ask question 4.
+- `GOOGLE_WORKSPACE_CLI_CLIENT_ID` or `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` makes gws log every account in on that client instead of the account's own file: unset both in step 7's commands. Any other `GOOGLE_WORKSPACE_CLI_` variable makes the wrapper hand calls straight to gws: tell the person where it is set and ask them to remove it.
+
+Then ask the person these questions in one message, and work without asking again until step 7 needs their browser:
+
+1. Which Google accounts to set up. For each one: a short name that is not taken, such as `work` or `personal`, which becomes `GWS_ACCOUNT=<name>` and the directory `~/.config/gws/<name>/`, and its email address.
 2. Does their organization provide a shared OAuth client file (`client_secret.json`, for a Desktop-app client)? If it does, where do you get it: a path on this machine, or where to download it?
 3. What may agents do on these accounts?
    - **Read only** (recommended): read-only Drive, Sheets, Docs, Slides, Calendar, Tasks and Gmail.
    - **Read and write**: Drive, Sheets, Docs, Slides, Calendar and Tasks, plus `gmail.modify`, which can also send mail.
+4. Only if `~/.config/gws` holds an earlier login: remove it after step 8? Removing it means `GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws" gws auth logout`, which deletes that login and its token cache and nothing else.
 
 Do not ask anything you can check yourself: the operating system, the shell, installed tools, agent harnesses, or whether there is a display.
 
@@ -29,7 +43,7 @@ git --version
 curl --version | head -n 1
 ```
 
-If jq is missing, install it with the system package manager (`sudo apt-get install -y jq`, `brew install jq`). If that needs a password, ask the person to run it.
+If jq is missing: on macOS, `brew install jq`; on Linux, ask the person before running `sudo apt-get install -y jq` (or their distribution's equivalent).
 
 Then look for gws:
 
@@ -37,7 +51,7 @@ Then look for gws:
 type -a gws && gws --version
 ```
 
-If gws is missing, or older than 0.22.5, put the release binary in `~/.local/bin`:
+If gws is missing, or older than 0.22.5, put the 0.22.5 release binary in `~/.local/bin`. The wrapper and the skill document 0.22.5, and gws changes its flags between releases.
 
 ```bash
 (
@@ -50,7 +64,7 @@ If gws is missing, or older than 0.22.5, put the release binary in `~/.local/bin
     *) echo "no gws release for $(uname -sm)"; exit 1 ;;
   esac
   asset="google-workspace-cli-$target.tar.gz"
-  base=https://github.com/googleworkspace/cli/releases/latest/download
+  base=https://github.com/googleworkspace/cli/releases/download/v0.22.5
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   cd "$tmp"
@@ -63,7 +77,7 @@ If gws is missing, or older than 0.22.5, put the release binary in `~/.local/bin
 ~/.local/bin/gws --version
 ```
 
-`npm install -g @googleworkspace/cli` also works when npm's global directory is on PATH and writable without sudo.
+`npm install -g @googleworkspace/cli@0.22.5` also works when npm's global directory is on PATH and writable without sudo.
 
 **Check:** `gws --version` (or `~/.local/bin/gws --version`) prints `gws 0.22.5` or later.
 
@@ -108,23 +122,23 @@ done
 
 Both lines must say `wrapper first`. If one does not, run `type -a gws` in that kind of shell: a line in the startup files that runs after this one puts another directory first (a version manager's activation, for one). Move the gws-accounts line below it.
 
-Your own shell started before this change. Run `export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"` in it, or begin each later command with it, and confirm `type -a gws` lists the wrapper first. Agent sessions that were already running need a restart to pick up the new PATH and the skill.
+Your own shell started before this change, and harnesses such as Claude Code keep no exported variables between commands. Start every later command that runs gws with `export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH";`, and confirm `type -a gws` lists the wrapper first. Agent sessions that were already running need a restart to pick up the new PATH and the skill.
 
 ## 4. The skill
 
-Install the google-workspace skill into every agent harness on this machine (`command -v claude omp`), and into the one you are running in.
+Install the google-workspace skill into every agent harness on this machine (`command -v claude omp`), and into the one you are running in. Each installs the same tag as the wrapper.
 
 **Claude Code:**
 
 ```bash
-claude plugin marketplace add sjawhar/gws-accounts
+claude plugin marketplace add "sjawhar/gws-accounts#$(git -C ~/.local/share/gws-accounts describe --tags)"
 claude plugin install gws-accounts@gws-accounts
 claude plugin details gws-accounts@gws-accounts
 ```
 
 **Check:** the details list `Skills (1)  google-workspace`.
 
-**omp:** install the same tag as the wrapper. omp installs plugins with bun, so bun has to be on PATH.
+**omp:** omp installs plugins with bun, so bun has to be on PATH.
 
 ```bash
 omp plugin install "github:sjawhar/gws-accounts#$(git -C ~/.local/share/gws-accounts describe --tags)"
@@ -137,28 +151,32 @@ omp skill list | cut -f 1
 
 ```bash
 mkdir -p "<skills dir>"
-ln -sfn ~/.local/share/gws-accounts/skills/google-workspace "<skills dir>/google-workspace"
+[ -e "<skills dir>/google-workspace" ] || [ -L "<skills dir>/google-workspace" ] ||
+  ln -s ~/.local/share/gws-accounts/skills/google-workspace "<skills dir>/google-workspace"
 ```
 
-**Check:** `head -n 3 "<skills dir>/google-workspace/SKILL.md"` shows `name: google-workspace`.
+**Check:** `readlink "<skills dir>/google-workspace"` prints the clone's skill path. Anything else is another skill with that name: leave it, and tell the person.
 
 ## 5. Accounts
 
-Add each account to `~/.config/gws/accounts.json`, with no `tiers` and a description that says who the account is, and create its directory. Agents choose an account by reading these descriptions. An existing file is merged into, never replaced: an account name it already has keeps its entry. If a name you were going to add is already taken, tell the person.
+Add each account to `~/.config/gws/accounts.json`, with no `tiers` and a description that says who the account is, and create its directory. Agents choose an account by reading these descriptions. An existing file is merged into, never replaced. A name that step 1 found taken, in the file or as a directory, stays as it is: leave that account and its directory alone, skip it in steps 6–8, and ask the person for another name.
 
 ```bash
 mkdir -p -m 700 ~/.config/gws
 f=~/.config/gws/accounts.json
 [ -e "$f" ] || printf '{}\n' >"$f"
-jq -r 'keys[]' "$f"                      # the names already taken
 # once per account:
-jq --arg name '<name>' --arg desc '<email>, <who it is, e.g. "Example Corp Workspace" or "personal Gmail">' \
-  'if has($name) then . else . + {($name): {description: $desc}} end' "$f" >"$f.new" &&
-  cat "$f.new" >"$f" && rm "$f.new"
-mkdir -p -m 700 ~/.config/gws/<name>
+name='<name>'
+if jq -e --arg name "$name" 'has($name)' "$f" >/dev/null || [ -e ~/.config/gws/"$name" ]; then
+  echo "$name is taken"
+else
+  jq --arg name "$name" --arg desc '<email>, <who it is, e.g. "Example Corp Workspace" or "personal Gmail">' \
+    '. + {($name): {description: $desc}}' "$f" >"$f.new" && cat "$f.new" >"$f" && rm "$f.new" &&
+    mkdir -m 700 ~/.config/gws/"$name"
+fi
 ```
 
-`cat "$f.new" >"$f"` writes through a symlinked `accounts.json` instead of replacing the link.
+`cat "$f.new" >"$f"` writes through a symlinked `accounts.json` instead of replacing the link. Running the block again for an account it already added prints `taken`; that account is yours, not taken.
 
 **Check:**
 
@@ -172,39 +190,44 @@ It fails with `gws-accounts: no account selected` and lists every account, each 
 
 gws reads the OAuth client from `client_secret.json` in the store it runs on, so each account's directory needs its own copy.
 
-**With the organization's file.** Check that it is a Desktop-app client, without printing it:
+**With the organization's file.** If it has to be downloaded, save it straight to the first account's `~/.config/gws/<name>/client_secret.json`, with `umask 077` set for the download, and use that file as `<path>` for the other accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each account that has no client yet:
 
 ```bash
 jq -e '.installed | has("client_id") and has("client_secret") and has("project_id") and has("auth_uri") and has("token_uri")' "<path>" >/dev/null && echo "Desktop client"
-install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account
+[ -e ~/.config/gws/<name>/client_secret.json ] || install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account
 ```
 
-A file without an `installed` object is some other kind of client, which gws cannot use: ask for the Desktop-app client. Use the file as it is. Do not create another client in the organization's project or add a secret to its client: a client holds at most two secrets.
+A file without an `installed` object is some other kind of client, which gws cannot use: delete a copy you downloaded, and ask for the Desktop-app client. Use the file as it is. Do not create another client in the organization's project or add a secret to its client: a client holds at most two secrets.
 
-**Without one,** the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run this in a new terminal, once per account:
+**Without one,** the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run it once, in a new terminal on this machine (over ssh if they sit elsewhere):
 
 ```bash
-GWS_ACCOUNT=<name> gws auth setup
+GWS_ACCOUNT=<first name> gws auth setup
 ```
 
-The wrapper hands `gws auth setup` to gws with the account's directory as its store, so gws writes the client there.
+Tell them, before they start:
+
+- On the consent screen, choose **Internal** when every account belongs to the project's Workspace organization. Otherwise choose External and then publish the app (In production): Google gives an External app left in Testing logins that expire after 7 days.
+- When setup asks `Run gws auth login now? [Y/n]`, answer `n`. Step 7 logs in with the scopes chosen in step 1.
+
+The wrapper hands `gws auth setup` to gws with the account's directory as its store, so gws writes the client there. Copy it to each other account the consent screen admits, with the guarded `install` above and `<path>` = `~/.config/gws/<first name>/client_secret.json`.
 
 **Check:** `ls -l ~/.config/gws/<name>/client_secret.json` shows the file, with mode `-rw-------`, for every account.
 
 ## 7. Log in
 
-Log in each account with the scopes the person chose in step 1:
+Log in each account with the scopes the person chose in step 1, following `~/.local/share/gws-accounts/skills/google-workspace/references/auth-login.md`: in the background with a timeout and its output in a log, giving the person the URL from the log and telling them which Google account to choose on the consent page, then polling. Its `<scope flags>` are:
 
-- **Read only:** `GWS_ACCOUNT=<name> gws auth login --readonly`
-- **Read and write:** `GWS_ACCOUNT=<name> gws auth login --scopes 'https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks'`
+- **Read only:** `--readonly`
+- **Read and write:** `--scopes 'https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks'`
 
-Always pass one of the two. With neither, gws opens an interactive scope picker whenever it has a terminal, and it has one when the wrapper runs the login through forward. gws adds `openid` and the `userinfo` scopes to either.
+If step 1 found `GOOGLE_WORKSPACE_CLI_CLIENT_ID` or `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET`, start each login with `unset GOOGLE_WORKSPACE_CLI_CLIENT_ID GOOGLE_WORKSPACE_CLI_CLIENT_SECRET;`.
 
-Run the login the way `~/.local/share/gws-accounts/skills/google-workspace/references/auth-login.md` describes: in the background with its output in a log, giving the person the URL from the log and telling them which Google account to choose on the consent page, then polling `gws auth status`. After consent, Google sends the browser to `http://localhost:<port>` on the machine running gws:
+After consent, Google sends the browser to `http://localhost:<port>` on the machine running gws. The person's browser is on this machine when `SSH_CONNECTION` is unset and either the system is macOS or `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it is elsewhere. If the person says otherwise, believe them.
 
 - **The browser is on this machine:** nothing more is needed.
-- **No display, and `forward` is on PATH:** the wrapper opens the URL in the person's browser and carries the redirect back. The README's "Logging in with no display" covers its failure.
-- **No display and no forward:** use the `ssh -L` tunnel that `auth-login.md` describes, opened before the person clicks through. If they cannot open a tunnel, the browser ends on a page that fails to load at `http://localhost:<port>/?code=…`. Ask them to copy that whole address from the address bar and send it to you, then fetch it on this machine while the login is still waiting:
+- **The browser is elsewhere, and `forward` is on PATH:** the wrapper opens the URL in the person's browser and carries the redirect back. The README's "Logging in with no display" covers its failure.
+- **The browser is elsewhere, without forward:** use the `ssh -L` tunnel that `auth-login.md` describes, opened before the person clicks through. If they cannot open a tunnel, the browser ends on a page that fails to load at `http://localhost:<port>/?code=…`. Ask them to copy that whole address from the address bar and send it to you, then fetch it on this machine while the login is still waiting:
 
   ```bash
   curl -sS '<the address they sent>'
@@ -229,6 +252,14 @@ env -u GWS_ACCOUNT gws drive about get
 ```
 
 **Check:** it fails with `gws-accounts: no account selected` and lists the accounts.
+
+If the person answered yes to question 4, remove the earlier login now:
+
+```bash
+GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws" gws auth logout
+```
+
+**Check:** `ls ~/.config/gws` shows no `credentials.enc` or `credentials.json`, and every account directory is still there.
 
 ## 9. Tell the person
 
