@@ -2,7 +2,7 @@
 
 You are a coding agent setting up gws-accounts for the person you work for. Run the steps in order. Each step ends with a check; move on only when it passes.
 
-The goal: for every Google account the person names, `GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}'` prints that account's email. The person only answers the questions in step 1, supplies their organization's OAuth client file (without one, runs `gws auth setup` in step 6), and clicks through Google's consent page.
+The goal: for every Google account the person names, `GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}'` prints that account's email. The person only answers the questions in step 1, supplies their organization's OAuth client file (for accounts it does not admit, or without one, runs `gws auth setup` in step 6), and clicks through Google's consent page.
 
 Never print a credential: no client secret, refresh token or access token, and never the contents of `client_secret.json` or `credentials.*`.
 
@@ -191,16 +191,16 @@ It fails with `gws-accounts: no account selected` and lists every account, each 
 
 gws reads the OAuth client from `client_secret.json` in the store it runs on, so each account's directory needs its own copy.
 
-**With the organization's file.** If it has to be downloaded, save it straight to `~/.config/gws/<name>/client_secret.json` of one account you added in step 5 that has no `client_secret.json` yet, never an account that was already there, with `umask 077` set for the download, and use that file as `<path>` for the other accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each account that has no client yet:
+**With the organization's file.** An organization's client is usually Internal, which admits only accounts in that organization: Google answers anyone else with an `org_internal` error. Give it to the accounts that organization's Workspace manages (usually those at its domain; a Workspace can have several), and set up every other account, such as a personal Gmail, as described under **Without one** below; if Google still answers an account with `org_internal`, delete that account's `client_secret.json` and set it up that way too. A client the person made themselves, such as one step 1 found in `~/.config/gws`, is not an organization's: copy it to each account its consent screen admits, as with a client from `gws auth setup`. If the organization's file has to be downloaded, save it straight to `~/.config/gws/<name>/client_secret.json` of one organization account you added in step 5 that has no `client_secret.json` yet, never an account that was already there, with `umask 077` set for the download, and use that file as `<path>` for the other organization accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each organization account that has no client yet:
 
 ```bash
 jq -e '.installed | has("client_id") and has("client_secret") and has("project_id") and has("auth_uri") and has("token_uri")' "<path>" >/dev/null && echo "Desktop client"
-[ -e ~/.config/gws/<name>/client_secret.json ] || install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account
+[ -e ~/.config/gws/<name>/client_secret.json ] || install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account that gets this client
 ```
 
 A file without an `installed` object is some other kind of client, which gws cannot use: delete a copy you downloaded, and ask for the Desktop-app client. Use the file as it is. Do not create another client in the organization's project or add a secret to its client: a client holds at most two secrets.
 
-**Without one,** the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run it once, in a new terminal on this machine (over ssh if they sit elsewhere):
+**Without one,** and for the accounts the organization's client does not admit, unless a client the person made themselves already covers them, the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run it once, in a new terminal on this machine (over ssh if they sit elsewhere), naming one of those accounts:
 
 ```bash
 GWS_ACCOUNT=<first name> gws auth setup
@@ -208,7 +208,7 @@ GWS_ACCOUNT=<first name> gws auth setup
 
 Tell them, before they start:
 
-- On the consent screen, choose **Internal** when every account belongs to the project's Workspace organization. Otherwise choose External and then publish the app (In production): Google gives an External app left in Testing logins that expire after 7 days.
+- On the consent screen, choose **Internal** when every account this client is for belongs to the project's Workspace organization. Otherwise choose External and then publish the app (In production): Google gives an External app left in Testing logins that expire after 7 days. A published app nobody has verified shows Google's "unverified app" screen before consent; for a client the person made for themselves, they click **Advanced**, then **Go to <app name> (unsafe)**, unless their Workspace admin or Advanced Protection blocks unverified apps for that account.
 - When setup asks `Run gws auth login now? [Y/n]`, answer `n`. Step 7 logs in with the scopes chosen in step 1.
 
 The wrapper hands `gws auth setup` to gws with the account's directory as its store, so gws writes the client there. Copy it to each other account the consent screen admits, with the guarded `install` above and `<path>` = `~/.config/gws/<first name>/client_secret.json`.
