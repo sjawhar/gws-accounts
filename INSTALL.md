@@ -21,7 +21,7 @@ env | grep -oE '^GOOGLE_WORKSPACE_CLI_[A-Z_]+'
 - Every name in `accounts.json`, and every directory in `~/.config/gws` (gws keeps its own `cache` there), is taken: step 5 leaves those alone.
 - `client_secret.json` in `~/.config/gws` is a Desktop client gws already uses: offer it as the answer to question 2.
 - `credentials.enc` or `credentials.json` in `~/.config/gws` is an earlier login. The wrapper never uses it, but gws does whenever the wrapper is bypassed, with whatever scopes it was granted: ask question 4.
-- `GOOGLE_WORKSPACE_CLI_CLIENT_ID` or `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` makes gws log every account in on that client instead of the account's own file: unset both in step 7's commands. Any other `GOOGLE_WORKSPACE_CLI_` variable makes the wrapper hand calls straight to gws: tell the person where it is set and ask them to remove it.
+- `GOOGLE_WORKSPACE_CLI_CLIENT_ID` or `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` makes gws log every account in on that client instead of the account's own file: unset both in step 7's commands. `GOOGLE_WORKSPACE_CLI_TOKEN`, `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, or a `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` that is not an account's directory makes the wrapper hand calls straight to gws: tell the person where it is set and ask them to remove it. Leave other `GOOGLE_WORKSPACE_CLI_` variables alone.
 
 Then ask the person these questions in one message, and work without asking again until step 7 needs their browser:
 
@@ -128,15 +128,16 @@ Your own shell started before this change, and harnesses such as Claude Code kee
 
 Install the google-workspace skill into every agent harness on this machine (`command -v claude omp`), and into the one you are running in. Each installs the same tag as the wrapper.
 
-**Claude Code:**
+**Claude Code:** adding the marketplace fails while it is already added from another source (another tag, or none), so the first line removes it. Removing it uninstalls the plugin, and the next lines put it back at the tag.
 
 ```bash
+if claude plugin marketplace list | grep -q 'gws-accounts'; then claude plugin marketplace remove gws-accounts; fi
 claude plugin marketplace add "sjawhar/gws-accounts#$(git -C ~/.local/share/gws-accounts describe --tags)"
 claude plugin install gws-accounts@gws-accounts
 claude plugin details gws-accounts@gws-accounts
 ```
 
-**Check:** the details list `Skills (1)  google-workspace`.
+**Check:** the details list `Skills (1)  google-workspace`, and `claude plugin list` shows gws-accounts at a `Version:` that begins with the output of `git -C ~/.local/share/gws-accounts rev-parse --short=12 HEAD`.
 
 **omp:** omp installs plugins with bun, so bun has to be on PATH.
 
@@ -216,7 +217,7 @@ The wrapper hands `gws auth setup` to gws with the account's directory as its st
 
 ## 7. Log in
 
-Log in each account with the scopes the person chose in step 1, following `~/.local/share/gws-accounts/skills/google-workspace/references/auth-login.md`: in the background with a timeout and its output in a log, giving the person the URL from the log and telling them which Google account to choose on the consent page, then polling. Its `<scope flags>` are:
+Log in each account with the scopes the person chose in step 1, following `~/.local/share/gws-accounts/skills/google-workspace/references/auth-login.md`: in the background with a time limit and its output in a log, giving the person the URL from the log and telling them which Google account to choose on the consent page, then polling. Its `<scope flags>` are:
 
 - **Read only:** `--readonly`
 - **Read and write:** `--scopes 'https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks'`
@@ -226,8 +227,8 @@ If step 1 found `GOOGLE_WORKSPACE_CLI_CLIENT_ID` or `GOOGLE_WORKSPACE_CLI_CLIENT
 After consent, Google sends the browser to `http://localhost:<port>` on the machine running gws. The person's browser is on this machine when `SSH_CONNECTION` is unset and either the system is macOS or `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it is elsewhere. If the person says otherwise, believe them.
 
 - **The browser is on this machine:** nothing more is needed.
-- **The browser is elsewhere, and `forward` is on PATH:** the wrapper opens the URL in the person's browser and carries the redirect back. The README's "Logging in with no display" covers its failure.
-- **The browser is elsewhere, without forward:** use the `ssh -L` tunnel that `auth-login.md` describes, opened before the person clicks through. If they cannot open a tunnel, the browser ends on a page that fails to load at `http://localhost:<port>/?code=…`. Ask them to copy that whole address from the address bar and send it to you, then fetch it on this machine while the login is still waiting:
+- **The browser is elsewhere, `forward` is on PATH, and no display variable is set (`DISPLAY`, `WAYLAND_DISPLAY`, `MIR_SOCKET`):** the wrapper opens the URL in the person's browser and carries the redirect back. The README's "Logging in with no display" covers its failure. With a display variable set, as under `ssh -X`, the wrapper does not use forward: follow the next bullet.
+- **The browser is elsewhere, and the wrapper does not use forward:** use the `ssh -L` tunnel that `auth-login.md` describes, opened before the person clicks through. If they cannot open a tunnel, the browser ends on a page that fails to load at `http://localhost:<port>/?code=…`. Ask them to copy that whole address from the address bar and send it to you, then fetch it on this machine while the login is still waiting:
 
   ```bash
   curl -sS '<the address they sent>'
