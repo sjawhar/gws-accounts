@@ -16,6 +16,14 @@ GWS_ACCOUNT=work GWS_TIER=send gws gmail +send --to a@example.com …       # ru
 
 ## Install
 
+Give this to your coding agent (Claude Code, omp, or another):
+
+```text
+Install and set up gws-accounts by following https://raw.githubusercontent.com/sjawhar/gws-accounts/main/INSTALL.md
+```
+
+The agent asks which Google accounts to set up, installs gws, the wrapper and the skill, and gives you each account's Google consent page to click through. To install by hand instead:
+
 Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH, and every gws that hands the call straight back to it, as mise's gws shim does when mise has no gws version for the directory; with nothing left, it exits 127 instead of looping.
 
 ```bash
