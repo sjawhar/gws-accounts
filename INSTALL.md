@@ -25,7 +25,7 @@ env | grep -oE '^GOOGLE_WORKSPACE_CLI_[A-Z_]+'
 
 Then ask the person these questions in one message, and work without asking again until step 7 needs their browser:
 
-1. Which Google accounts to set up. For each one: a short name that is not taken, such as `work` or `personal`, which becomes `GWS_ACCOUNT=<name>` and the directory `~/.config/gws/<name>/`, and its email address.
+1. Which Google accounts to set up. For each one: a short name that is not taken, such as `work` or `personal`, which becomes `GWS_ACCOUNT=<name>` and the directory `~/.config/gws/<name>/`; its email address; and a few words on what it is (such as "Example Corp Workspace" or "personal Gmail"), which step 5 writes into its description.
 2. Does their organization provide a shared OAuth client file (`client_secret.json`, for a Desktop-app client)? If it does, where do you get it: a path on this machine, or where to download it?
 3. What may agents do on these accounts?
    - **Read only** (recommended): read-only Drive, Sheets, Docs, Slides, Calendar, Tasks and Gmail.
@@ -191,7 +191,7 @@ It fails with `gws-accounts: no account selected` and lists every account, each 
 
 gws reads the OAuth client from `client_secret.json` in the store it runs on, so each account's directory needs its own copy.
 
-**With the organization's file.** If it has to be downloaded, save it straight to the first account's `~/.config/gws/<name>/client_secret.json`, with `umask 077` set for the download, and use that file as `<path>` for the other accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each account that has no client yet:
+**With the organization's file.** If it has to be downloaded, save it straight to `~/.config/gws/<name>/client_secret.json` of one account you added in step 5 that has no `client_secret.json` yet, never an account that was already there, with `umask 077` set for the download, and use that file as `<path>` for the other accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each account that has no client yet:
 
 ```bash
 jq -e '.installed | has("client_id") and has("client_secret") and has("project_id") and has("auth_uri") and has("token_uri")' "<path>" >/dev/null && echo "Desktop client"
