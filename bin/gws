@@ -90,19 +90,6 @@ find_real_gws() {
     return 127
 }
 
-absolute_path() {
-    # Resolve a path without GNU readlink -f; macOS ships BSD readlink. CDPATH
-    # is cleared so cd neither prints the directory nor moves into a namesake.
-    local path="$1" directory
-    while [[ -L "$path" ]]; do
-        directory="$(CDPATH='' cd -P -- "$(dirname -- "$path")" && pwd -P)" || return
-        path="$(readlink "$path")" || return
-        [[ "$path" = /* ]] || path="${directory}/${path}"
-    done
-    directory="$(CDPATH='' cd -P -- "$(dirname -- "$path")" && pwd -P)" || return
-    printf '%s/%s\n' "$directory" "$(basename "$path")"
-}
-
 real_command() {
     # REAL_COMMAND := real gws $1 behind env, which drops the re-entry marker
     # and every GWS_*_OAUTH variable. run_materialized passes the selected
@@ -283,46 +270,40 @@ run_materialized() {
     # cache. A bare token goes only through GOOGLE_WORKSPACE_CLI_TOKEN and an
     # empty private store, so no stored login or client configuration can
     # supply credentials or a quota project.
-    local real_gws="$1" key="$2" store="$3" value creds_file client_id client_secret rc=0
+    local real_gws="$1" key="$2" store="$3" value token="" creds_file="" client_id="" client_secret="" rc=0
+    local json='^[[:space:]]*[{]'
     shift 3
     value="${!key}"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$TMP_DIR"' EXIT
-    # Credentials reach real gws as prefix assignments, which go into its
-    # environment; arguments to env would show them in ps. A source this call
-    # must not use is set empty, not unset: gws loads the nearest .env from its
-    # working directory for every variable left unset. An empty token is read
-    # as absent; an empty credentials-file or ADC path names no file, so the
-    # quota-project lookup skips it instead of falling back to the well-known
-    # ADC file.
     # A value whose first non-whitespace character is { is JSON, as jq reads it;
     # anything else must be one bare token with no whitespace anywhere.
-    if [[ "${value#"${value%%[![:space:]]*}"}" != \{* ]]; then
+    if [[ "$value" =~ $json ]]; then
+        creds_file="${TMP_DIR}/credential.json"
+        (umask 077 && printf '%s' "$value" >"$creds_file")
+        require_jq
+        client_id="$(jq -r '.client_id // empty' "$creds_file")" || die "$key is not valid JSON"
+        [[ -n "$client_id" ]] || die "$key is missing a non-empty client_id"
+        client_secret="$(jq -r '.client_secret // empty' "$creds_file")" || die "$key is not valid JSON"
+        [[ -n "$client_secret" ]] || die "$key is missing a non-empty client_secret"
+    else
         [[ -n "$value" && "$value" != *[[:space:]]* ]] ||
             die "$key is neither an authorized_user JSON credential nor a non-empty access token without whitespace"
-        real_command "$real_gws"
-        GOOGLE_WORKSPACE_CLI_TOKEN="$value" \
-            GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${TMP_DIR}/store" \
-            GOOGLE_APPLICATION_CREDENTIALS="" \
-            GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="" \
-            GOOGLE_WORKSPACE_CLI_CLIENT_ID="" \
-            GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="" \
-            "${REAL_COMMAND[@]}" "$@" || rc=$?
-        exit "$rc"
+        token="$value" store=""
     fi
-    real_command "$real_gws"
-    creds_file="${TMP_DIR}/credential.json"
     [[ -n "$store" ]] || store="${TMP_DIR}/store"
-    (umask 077 && printf '%s' "$value" >"$creds_file")
-    require_jq
-    client_id="$(jq -r '.client_id // empty' "$creds_file")" || die "$key is not valid JSON"
-    [[ -n "$client_id" ]] || die "$key is missing a non-empty client_id"
-    client_secret="$(jq -r '.client_secret // empty' "$creds_file")" || die "$key is not valid JSON"
-    [[ -n "$client_secret" ]] || die "$key is missing a non-empty client_secret"
+    real_command "$real_gws"
+    # Credentials reach real gws as prefix assignments, which go into its
+    # environment; arguments to env would show them in ps. Every source is
+    # assigned on both routes, and one this route must not use is set empty,
+    # not unset: gws loads the nearest .env from its working directory for
+    # every variable left unset. An empty token is read as absent; an empty
+    # credentials-file or ADC path names no file, so the quota-project lookup
+    # skips it instead of falling back to the well-known ADC file. For JSON,
     # GOOGLE_APPLICATION_CREDENTIALS names the same file: without it gws bills
     # the machine ADC's quota project, and another account's ADC gives a 403
     # naming that unrelated project.
-    GOOGLE_WORKSPACE_CLI_TOKEN="" \
+    GOOGLE_WORKSPACE_CLI_TOKEN="$token" \
         GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
@@ -339,7 +320,7 @@ run_tier_command() {
     local tier="$1"
     shift
     local self rc=0
-    self="$(absolute_path "${BASH_SOURCE[0]}")" || die "cannot resolve the wrapper path ${BASH_SOURCE[0]}"
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
     MARKER_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$MARKER_DIR"' EXIT
     GWS_ACCOUNTS_REENTRY="${MARKER_DIR}/entered" "${TIER_COMMAND[@]}" "$self" "$@" || rc=$?

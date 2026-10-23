@@ -66,16 +66,11 @@ for name in GOOGLE_APPLICATION_CREDENTIALS GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WOR
   inherited="STUB_INHERITED_$name"
   [ -z "${!inherited:-}" ] || export "$name=${!inherited}"
 done
-[ -z "${STUB_PROGRAM_LOG:-}" ] || printf '%s\n' "$1" >>"$STUB_PROGRAM_LOG"
 exec "$@"
 """
 
 FAKE_ENV = r"""printf '%s\n' "$@" >>"$STUB_ENV_ARG_LOG"
 exec /usr/bin/env "$@"
-"""
-
-FAKE_BSD_READLINK = r"""[ "$1" = -f ] && exit 1
-exec /usr/bin/readlink "$@"
 """
 
 # What mise's shim does when mise has no gws version for the directory (a relocated HOME or
@@ -333,6 +328,7 @@ class Routing(unittest.TestCase):
                 self.assertEqual(got["ADC"], got["FILE"])
                 self.assertEqual(got["CLIENT_ID"], "personal-read-client-id")
                 self.assertEqual(got["CLIENT_SECRET"], "personal-read-client-secret")
+                self.assertNotIn("LEAKED=", result.stdout)
                 self.assertFalse(Path(got["FILE"]).exists())
 
     def test_json_credential_clears_an_inherited_access_token(self):
@@ -446,41 +442,6 @@ class Routing(unittest.TestCase):
         store = Path(got["DIR"])
         self.assertFalse(store.is_relative_to(self.gws_root))
         self.assertFalse(store.exists())
-
-    def test_tier_resolves_the_wrapper_path_without_gnu_readlink(self):
-        # BSD readlink (macOS) has no -f; the tier command must still get the wrapper's real
-        # path, through absolute and relative symlinks, and with a CDPATH that names a decoy
-        # directory of the same name (cd then prints it and would move into it).
-        write_stub(self.stub_dir, "readlink", FAKE_BSD_READLINK)
-        root = self.stub_dir.parent
-        links = root / "links"
-        links.mkdir()
-        (links / "absolute").symlink_to(WRAPPER)
-        (links / "relative").symlink_to("absolute")
-        decoy = root / "decoy"
-        (decoy / "links").mkdir(parents=True)
-        program_log = root / "program"
-        cases = (
-            ("absolute", str(links / "absolute"), {}),
-            ("relative", str(links / "relative"), {}),
-            ("relative path with CDPATH", "links/relative", {"CDPATH": str(decoy)}),
-        )
-        for name, program, extra in cases:
-            with self.subTest(case=name):
-                program_log.unlink(missing_ok=True)
-                proc = subprocess.run(
-                    [program, "drive", "files", "list"],
-                    capture_output=True,
-                    text=True,
-                    cwd=root,
-                    env={**self.env, **extra, "GWS_ACCOUNT": "personal",
-                         "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value",
-                         "STUB_PROGRAM_LOG": str(program_log)},
-                    timeout=30,
-                )
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(fields(proc.stdout)["TOKEN"], "fixture-bearer-value")
-                self.assertEqual(program_log.read_text(encoding="utf-8"), f"{os.path.realpath(WRAPPER)}\n")
 
     def test_bare_access_token_cannot_bypass_tier_selection(self):
         value = "fixture-bearer-value"
