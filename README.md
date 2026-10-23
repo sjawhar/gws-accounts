@@ -81,7 +81,7 @@ A call selects an account the way gws selects a store: `GOOGLE_WORKSPACE_CLI_CON
 
 `GWS_TIER=<tier>` selects a tier; unset means `read`. An account with no `read` tier needs `GWS_TIER` on every call except `gws auth`, which takes none.
 
-A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to an `authorized_user` JSON credential: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). The command is not run through a shell, so `~` and `$HOME` do not expand in it.
+A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to either an `authorized_user` JSON credential or a bare OAuth2 access token: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). A value beginning with `{` is JSON; every other value must be a non-empty access token with no whitespace. The wrapper rejects empty or whitespace-containing values without printing them. The command is not run through a shell, so `~` and `$HOME` do not expand in it.
 
 Any secret runner works: [secretsd](https://github.com/sjawhar/forward)'s `secrets KEY --`, 1Password's `op run --env-file FILE --`, `sops exec-env`, or a script of your own. A plain file, for example:
 
@@ -91,9 +91,9 @@ Any secret runner works: [secretsd](https://github.com/sjawhar/forward)'s `secre
 
 **A tier protects exactly as much as the command that releases its credential.** A command that needs a human to approve each release (a hardware-key touch, a biometric prompt) keeps an agent from sending mail on its own. A command that reads a file only keeps an agent from doing it by accident.
 
-The wrapper writes the credential to a 0600 file in a private temporary directory, points gws at it, and removes it when gws exits. No `GWS_*_OAUTH` variable reaches gws's environment. The `read` tier runs against the account's directory, so gws keeps its token cache there; every other tier runs against a private store removed with the credential, because two tiers sharing an OAuth client would otherwise share cached tokens. Except for `gws auth`, the wrapper refuses a call on an account when the call already carries a `GWS_*_OAUTH` variable for an account or tier it did not select.
+For an `authorized_user` JSON credential, the wrapper writes a 0600 file in a private temporary directory, points gws at it, and removes it when gws exits. Its `read` tier runs against the account's directory, so gws keeps its token cache there; every other JSON tier runs against a private store removed with the credential, because two tiers sharing an OAuth client would otherwise share cached tokens. For a bare access token, the wrapper uses a separate empty private store and sets `GOOGLE_WORKSPACE_CLI_TOKEN`: gws receives no credentials file, Application Default Credentials path, client ID, or client secret. No `GWS_*_OAUTH` variable reaches gws's environment. Except for `gws auth`, the wrapper refuses a call on an account when the call already carries a `GWS_*_OAUTH` variable for an account or tier it did not select.
 
-The [skill](skills/google-workspace/SKILL.md) shows how to mint a credential for each tier, and how to call an API gws lacks (the Admin SDK Directory, for one) on a tier's credential.
+The [skill](skills/google-workspace/SKILL.md) shows how to mint an `authorized_user` JSON credential for a tier, work with a tier command that releases a bare token, and call an API gws lacks (the Admin SDK Directory, for one).
 
 ## Logging in with no display
 
@@ -105,7 +105,7 @@ The [skill](skills/google-workspace/SKILL.md) shows how to mint a credential for
 
 ## Design notes
 
-- **A wrapper, not a hook.** A hook can only allow or block a command. Tiers need a process around gws that fetches a credential and hands it over as a file, and a wrapper on PATH also covers callers no agent hook sees: scripts, MCP servers, `bash -c`.
+- **A wrapper, not a hook.** A hook can only allow or block a command. Tiers need a process around gws that fetches a credential and hands it to gws as either a file-backed JSON credential or an access-token environment variable, and a wrapper on PATH also covers callers no agent hook sees: scripts, MCP servers, `bash -c`.
 - **Not upstream.** gws removed its own multi-account support in v0.7.0 ([googleworkspace/cli#253](https://github.com/googleworkspace/cli/pull/253)).
 - **Fail loud.** A missing, ambiguous or mismatched credential is an error, never a fall-back to another account.
 

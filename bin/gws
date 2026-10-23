@@ -90,13 +90,26 @@ find_real_gws() {
     return 127
 }
 
+absolute_path() {
+    # Resolve a path without GNU readlink -f; macOS ships BSD readlink. CDPATH
+    # is cleared so cd neither prints the directory nor moves into a namesake.
+    local path="$1" directory
+    while [[ -L "$path" ]]; do
+        directory="$(CDPATH='' cd -P -- "$(dirname -- "$path")" && pwd -P)" || return
+        path="$(readlink "$path")" || return
+        [[ "$path" = /* ]] || path="${directory}/${path}"
+    done
+    directory="$(CDPATH='' cd -P -- "$(dirname -- "$path")" && pwd -P)" || return
+    printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
 real_command() {
     # REAL_COMMAND := real gws $1 behind env, which drops the re-entry marker
-    # and every GWS_*_OAUTH variable (a credential reaches real gws as a 0600
-    # file and no other way), and sh, which names the pid real gws runs in as
-    # handed the call. That pid is this wrapper's for an exec and a child's
-    # otherwise; sh knows its own where bash 3.2 has no $BASHPID, and its exec
-    # keeps it.
+    # and every GWS_*_OAUTH variable. run_materialized passes the selected
+    # credential as either a 0600 JSON file or GOOGLE_WORKSPACE_CLI_TOKEN.
+    # sh names the pid real gws runs in as handed the call. That pid is this
+    # wrapper's for an exec and a child's otherwise; sh knows its own where
+    # bash 3.2 has no $BASHPID, and its exec keeps it.
     local real_gws="$1" name
     REAL_COMMAND=(env -u GWS_ACCOUNTS_REENTRY)
     for name in $(compgen -v); do
@@ -265,17 +278,40 @@ stored_login() {
 }
 
 run_materialized() {
-    # Write the credential in $key to a 0600 file in a private directory and run
-    # real gws on it against STORE, the gws config dir that keeps its token
-    # cache. An empty STORE means a private store, removed with the credential.
-    local real_gws="$1" key="$2" store="$3"
+    # Run real gws with the selected tier credential. An authorized_user JSON
+    # credential is written to a 0600 file and may use STORE for its token
+    # cache. A bare token goes only through GOOGLE_WORKSPACE_CLI_TOKEN and an
+    # empty private store, so no stored login or client configuration can
+    # supply credentials or a quota project.
+    local real_gws="$1" key="$2" store="$3" value creds_file client_id client_secret rc=0
     shift 3
-    local creds_file client_id client_secret rc=0
+    value="${!key}"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$TMP_DIR"' EXIT
+    # Credentials reach real gws as prefix assignments, which go into its
+    # environment; arguments to env would show them in ps. A source this call
+    # must not use is set empty, not unset: gws loads the nearest .env from its
+    # working directory for every variable left unset. An empty token is read
+    # as absent; an empty credentials-file or ADC path names no file, so the
+    # quota-project lookup skips it instead of falling back to the well-known
+    # ADC file.
+    if [[ "$value" != \{* ]]; then
+        [[ -n "$value" && "$value" != *[[:space:]]* ]] ||
+            die "$key is neither an authorized_user JSON credential nor a non-empty access token without whitespace"
+        real_command "$real_gws"
+        GOOGLE_WORKSPACE_CLI_TOKEN="$value" \
+            GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${TMP_DIR}/store" \
+            GOOGLE_APPLICATION_CREDENTIALS="" \
+            GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="" \
+            GOOGLE_WORKSPACE_CLI_CLIENT_ID="" \
+            GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="" \
+            "${REAL_COMMAND[@]}" "$@" || rc=$?
+        exit "$rc"
+    fi
+    real_command "$real_gws"
     creds_file="${TMP_DIR}/credential.json"
     [[ -n "$store" ]] || store="${TMP_DIR}/store"
-    (umask 077 && printf '%s' "${!key}" >"$creds_file")
+    (umask 077 && printf '%s' "$value" >"$creds_file")
     require_jq
     client_id="$(jq -r '.client_id // empty' "$creds_file")" || die "$key is not valid JSON"
     [[ -n "$client_id" ]] || die "$key is missing a non-empty client_id"
@@ -284,8 +320,8 @@ run_materialized() {
     # GOOGLE_APPLICATION_CREDENTIALS names the same file: without it gws bills
     # the machine ADC's quota project, and another account's ADC gives a 403
     # naming that unrelated project.
-    real_command "$real_gws"
-    GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
+    GOOGLE_WORKSPACE_CLI_TOKEN="" \
+        GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
@@ -301,7 +337,7 @@ run_tier_command() {
     local tier="$1"
     shift
     local self rc=0
-    self="$(readlink -f "${BASH_SOURCE[0]}")"
+    self="$(absolute_path "${BASH_SOURCE[0]}")" || die "cannot resolve the wrapper path ${BASH_SOURCE[0]}"
     MARKER_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$MARKER_DIR"' EXIT
     GWS_ACCOUNTS_REENTRY="${MARKER_DIR}/entered" "${TIER_COMMAND[@]}" "$self" "$@" || rc=$?
@@ -361,11 +397,14 @@ main() {
     real_gws="$(find_real_gws)"
     cmd="$(first_arg "$@")"
 
-    # The caller supplied gws credentials itself, or the call needs none:
+    # A direct caller supplied gws credentials itself, or the call needs none:
     # `gws schema` reads public discovery documents, and a call with no
-    # subcommand only prints help or the version.
-    if [[ -n "${GOOGLE_WORKSPACE_CLI_TOKEN:-}" || -n "${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}" \
-        || -z "$cmd" || "$cmd" == schema ]]; then
+    # subcommand only prints help or the version. A tier command re-enters this
+    # wrapper with its marker set; it must not bypass selection because that
+    # command also inherited a gws credential setting.
+    if [[ -z "${GWS_ACCOUNTS_REENTRY:-}" ]] && \
+        [[ -n "${GOOGLE_WORKSPACE_CLI_TOKEN:-}" || -n "${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}" \
+            || -z "$cmd" || "$cmd" == schema ]]; then
         exec_real "$real_gws" "$@"
     fi
 
