@@ -27,7 +27,7 @@ The agent asks which Google accounts to set up, installs gws, the wrapper and th
 Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH, and every gws that hands the call straight back to it, as mise's gws shim does when mise has no gws version for the directory; with nothing left, it exits 127 instead of looping.
 
 ```bash
-git clone --branch v0.1.6 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
+git clone --branch v0.1.7 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
 export PATH="$HOME/.local/share/gws-accounts/bin:$PATH"    # in your shell profile
 type -a gws                                                 # the wrapper must be listed first
 ```
@@ -39,7 +39,7 @@ Do not install the wrapper as a mise tool next to gws. mise's shims mode puts a 
 The skill installs per agent:
 
 - **Claude Code**: `/plugin marketplace add sjawhar/gws-accounts`, then `/plugin install gws-accounts@gws-accounts`.
-- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.6`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks both an `omp` field and the legacy `pi` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
+- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.7`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks both an `omp` field and the legacy `pi` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
 
 ## Accounts
 
