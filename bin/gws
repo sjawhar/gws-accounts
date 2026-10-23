@@ -295,7 +295,9 @@ run_materialized() {
     # as absent; an empty credentials-file or ADC path names no file, so the
     # quota-project lookup skips it instead of falling back to the well-known
     # ADC file.
-    if [[ "$value" != \{* ]]; then
+    # A value whose first non-whitespace character is { is JSON, as jq reads it;
+    # anything else must be one bare token with no whitespace anywhere.
+    if [[ "${value#"${value%%[![:space:]]*}"}" != \{* ]]; then
         [[ -n "$value" && "$value" != *[[:space:]]* ]] ||
             die "$key is neither an authorized_user JSON credential nor a non-empty access token without whitespace"
         real_command "$real_gws"

@@ -348,6 +348,24 @@ class Routing(unittest.TestCase):
         self.assertEqual(got["EMPTY"], "GOOGLE_WORKSPACE_CLI_TOKEN")
         self.assertIn('"id": "personal-read"', result.stdout)
 
+    def test_json_credential_after_leading_whitespace_takes_the_json_route(self):
+        # A pretty-printed login a secret runner emits with a leading newline is still JSON:
+        # classification goes by the first non-whitespace character.
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "\n  \t" + json.dumps(
+                {"type": "authorized_user", "id": "pretty", "client_id": "pretty-client-id",
+                 "client_secret": "pretty-client-secret"}, indent=2),
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = fields(result.stdout)
+        self.assertEqual(got["TOKEN"], "")
+        self.assertEqual(got["MODE"], "600")
+        self.assertIn('"id": "pretty"', result.stdout)
+        self.assertEqual(got["CLIENT_ID"], "pretty-client-id")
+        self.assertEqual(got["CLIENT_SECRET"], "pretty-client-secret")
+        self.assertEqual(got["DIR"], str(self.gws_root / "personal"))
+
     def test_named_tier_runs_its_command_on_a_private_store(self):
         for exit_code in (0, 42):
             with self.subTest(exit_code=exit_code):
@@ -477,7 +495,8 @@ class Routing(unittest.TestCase):
         self.assertNotIn(value, result.stderr)
 
     def test_invalid_tier_values_are_refused_without_echoing_them(self):
-        for value in ("fixture bearer value", "fixture\nbearer\nvalue", "{not-json"):
+        for value in ("fixture bearer value", "fixture\nbearer\nvalue", "{not-json",
+                      " fixture-bearer-value", "fixture-bearer-value\n", "  \t ", "\n  {not-json"):
             with self.subTest(value=value):
                 result = self.run_gws({
                     "GWS_ACCOUNT": "personal",

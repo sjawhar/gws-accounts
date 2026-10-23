@@ -34,7 +34,7 @@ GWS_ACCOUNT=personal GWS_TIER=send gws gmail +send --to a@example.com --subject 
 - A tier's description may say that releasing its credential needs a human: a hardware-key touch, a biometric prompt. Tell the human which account and tier you are about to use before the call, run such calls one at a time, and front-load them before any long unattended work.
 - An account without tiers runs on the login `gws auth login` stored in its directory. `GWS_TIER` on it is an error. Until that login exists, every call on it except `gws auth` fails with `holds no stored login`; the login is `GWS_ACCOUNT=<account> gws auth login`, which needs the user to consent in a browser (gws auth, below).
 - Never set a `GWS_*_OAUTH` variable yourself. The wrapper runs the tier's command, which injects it, and, except for `gws auth`, refuses a call on an account that carries one for a tier or account it did not select.
-- A tier command may inject either an `authorized_user` JSON credential or a bare OAuth2 access token. JSON begins with `{`; a bare token must be non-empty and have no whitespace. The wrapper gives gws a JSON credential through a temporary credentials file, or a bare token through `GOOGLE_WORKSPACE_CLI_TOKEN` in an empty private store with no credentials file, Application Default Credentials path, client ID, or client secret. Do not expose either value in a command line, file, or transcript.
+- A tier command may inject either an `authorized_user` JSON credential or a bare OAuth2 access token. A value whose first non-whitespace character is `{` is JSON; a bare token must be non-empty and have no whitespace anywhere. The wrapper gives gws a JSON credential through a temporary credentials file, or a bare token through `GOOGLE_WORKSPACE_CLI_TOKEN` in an empty private store with no credentials file, Application Default Credentials path, client ID, or client secret. Do not expose either value in a command line, file, or transcript.
 
 `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` pointing anywhere outside `~/.config/gws/<account>` runs gws on that store with no credential injected. That is how minting works (below). `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` set by the caller bypass account selection entirely.
 
@@ -112,7 +112,7 @@ while IFS= read -r arg; do cmd+=("$arg"); done < <(jq -r --arg a <account> --arg
 "${cmd[@]}" python3 - <<'EOF'
 import json, os, urllib.parse, urllib.request
 value = os.environ["GWS_<ACCOUNT>_<TIER>_OAUTH"]
-if value.startswith("{"):
+if value.lstrip().startswith("{"):
     cred = json.loads(value)
     form = {k: cred[k] for k in ("client_id", "client_secret", "refresh_token")} | {"grant_type": "refresh_token"}
     token = json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", urllib.parse.urlencode(form).encode()))["access_token"]
