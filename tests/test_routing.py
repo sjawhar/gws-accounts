@@ -36,10 +36,10 @@ set_nonempty=""
 for v in GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_APPLICATION_CREDENTIALS GOOGLE_WORKSPACE_CLI_CLIENT_ID GOOGLE_WORKSPACE_CLI_CLIENT_SECRET; do
   if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then empty="$empty $v"; fi
 done
-# NEUTRAL lists the keys the launch passes empty so gws cannot take them from a .env;
-# SET lists any of them the caller set, which the launch leaves alone.
+# NEUTRAL lists the keys gws receives set to empty, so it cannot take them from a .env;
+# SET lists any of them that arrive with a value.
 for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy \
-  SSLKEYLOGFILE XDG_CONFIG_HOME TMPDIR GOOGLE_APPLICATION_CREDENTIALS; do
+  SSLKEYLOGFILE XDG_CONFIG_HOME; do
   if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then neutral="$neutral $v"; fi
   if [ -n "${!v:-}" ]; then set_nonempty="$set_nonempty $v=${!v}"; fi
 done
@@ -513,12 +513,32 @@ class Routing(unittest.TestCase):
                 self.assertIn("NO_PROXY", neutral)
                 self.assertNotIn(proxy, result.stdout)
 
-    def test_a_proxy_the_caller_set_survives_the_neutralizing(self):
-        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "HTTPS_PROXY": "http://corp-proxy.example:3128",
+    def test_a_proxy_the_caller_set_survives_in_either_case(self):
+        # hyper-util reads the first name of a pair that is set, even to empty, so an empty
+        # twin would hide the caller's value. The launch copies it into the twin instead.
+        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\nhttp_proxy=http://x.invalid\n")
+        for upper, lower in (("HTTP_PROXY", "http_proxy"), ("HTTPS_PROXY", "https_proxy"),
+                             ("ALL_PROXY", "all_proxy"), ("NO_PROXY", "no_proxy")):
+            for caller_name in (upper, lower):
+                with self.subTest(caller=caller_name):
+                    value = "http://corp-proxy.example:3128"
+                    result = self.run_gws({"GWS_ACCOUNT": "personal", caller_name: value,
+                                           "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    got = fields(result.stdout)["SET"].split()
+                    self.assertIn(f"{upper}={value}", got)
+                    self.assertIn(f"{lower}={value}", got)
+                    self.assertNotIn("invalid", result.stdout)
+
+    def test_a_proxy_pair_the_caller_set_both_names_of_is_left_alone(self):
+        work = self.dotenv_tree("APP_ENV=dev\n")
+        result = self.run_gws({"GWS_ACCOUNT": "personal",
+                               "HTTPS_PROXY": "http://upper.example:3128", "https_proxy": "http://lower.example:3128",
                                "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("HTTPS_PROXY=http://corp-proxy.example:3128", fields(result.stdout)["SET"])
+        got = fields(result.stdout)["SET"].split()
+        self.assertIn("HTTPS_PROXY=http://upper.example:3128", got)
+        self.assertIn("https_proxy=http://lower.example:3128", got)
 
     def test_dotenv_forms_dotenvy_loads_are_refused(self):
         cases = {
@@ -598,7 +618,7 @@ class Routing(unittest.TestCase):
     def test_audited_keys_are_neutralized_or_refused_as_measured(self):
         # Each key was measured against real gws 0.22.5 with an empty value. The ones an
         # empty value turns off are passed empty; the ones it breaks or misleads are refused.
-        neutralized = ("SSLKEYLOGFILE", "XDG_CONFIG_HOME", "TMPDIR", "GOOGLE_APPLICATION_CREDENTIALS")
+        neutralized = ("SSLKEYLOGFILE", "XDG_CONFIG_HOME")
         refused = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUEST_METHOD")
         for key in neutralized + refused + ("PATH",):
             with self.subTest(key=key):
@@ -616,6 +636,18 @@ class Routing(unittest.TestCase):
                 self.assertNotIn("/srv/evil", result.stdout)
                 if key != "PATH":
                     self.assertIn(key, fields(result.stdout)["NEUTRAL"].split())
+
+    def test_a_deleted_working_directory_runs_instead_of_hanging(self):
+        # A failed pwd must end the .env search: gws cannot load a .env from a directory that
+        # no longer exists. run_gws's 30-second timeout fails the test if the wrapper spins.
+        gone = self.root / "gone"
+        gone.mkdir()
+        script = f'cd "{gone}" && rmdir "{gone}" && exec "{WRAPPER}" drive files list'
+        proc = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30,
+                              env={**self.env, "GWS_ACCOUNT": "personal",
+                                   "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(fields(proc.stdout)["TOKEN"], "fixture-bearer-value")
 
     def test_a_working_directory_whose_name_ends_in_a_newline_is_not_a_way_past(self):
         # Command substitution strips trailing newlines, so a wrapper that read the working
@@ -698,16 +730,23 @@ class Routing(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"ARG={args[0]}", result.stdout)
 
-    def test_stored_login_neutralizes_a_dotenv_naming_application_credentials(self):
-        # Off the tier route nothing assigns GOOGLE_APPLICATION_CREDENTIALS a value, so the
-        # launch passes it empty and gws cannot read the .env's path.
+    def test_stored_login_is_refused_under_a_dotenv_naming_application_credentials(self):
+        # Off the tier route nothing assigns GOOGLE_APPLICATION_CREDENTIALS, and an empty value
+        # breaks gws's own ADC fallback, so a .env naming it is refused here.
         self.store_login("plain@example.com")
         work = self.dotenv_tree("GOOGLE_APPLICATION_CREDENTIALS=/srv/project/sa.json\n")
         result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, cwd=work)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", fields(result.stdout)["NEUTRAL"].split())
-        self.assertNotIn("/srv/project", result.stdout)
+        self.assert_rejected_before_gws_or_secrets(
+            result, 1, os.path.realpath(self.root / "project" / ".env"), "GOOGLE_APPLICATION_CREDENTIALS")
         self.assertNotIn("/srv/project", result.stderr)
+
+    def test_pass_through_leaves_application_credentials_unset(self):
+        # gws reads an empty value as an explicit path and skips the well-known ADC file, so the
+        # launch must not set it when the caller did not.
+        result = self.run_gws({"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/tmp/mint-store"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", fields(result.stdout)["EMPTY"].split())
+        self.assertEqual(fields(result.stdout)["ADC"], "")
 
     def test_auth_call_is_refused_under_a_dotenv_gcloud_would_read(self):
         # gws auth starts gcloud, which inherits what gws loaded from .env.
