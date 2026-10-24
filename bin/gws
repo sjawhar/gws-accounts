@@ -74,10 +74,23 @@ readonly DOTENV_REFUSE_PREFIXES="GOOGLE_WORKSPACE_"
 # loader's LD_*/DYLD_*, OPENSSL_*, bash's BASH_ENV, SHELLOPTS and PS4, and
 # TMPDIR, where Python's tempfile puts its files. Whether gcloud writes a
 # credential there is unmeasured, so it is refused for an auth call too.
+#
+# BROWSER is a program, not a browser name: gcloud's login flow calls Python's
+# webbrowser.open (flow.py:339-341 through check_browser.py:47-64), which
+# gives BROWSER first place (webbrowser.py:542-552), splits a value holding %s
+# into a command line (:49-55) and runs it with subprocess.Popen (:179-189).
+# A project .env could otherwise run a program of its choosing as the caller,
+# during gws auth setup. DISPLAY and WAYLAND_DISPLAY choose no program by
+# themselves, but gcloud tries a browser at all only when one of them is set
+# (check_browser.py:27,54-56), and an empty value counts as unset there, so a
+# project .env must not be what supplies them. MIR_SOCKET is the third name on
+# that list. GNOME_DESKTOP_SESSION_ID and KDE_FULL_SESSION pick which
+# registered browser runs (webbrowser.py:434-439), and TERM admits the console
+# browsers (:524-538).
 # These are refused rather than neutralised, since each belongs to a program
 # the wrapper does not launch and cannot measure. Only an auth call is refused
 # for them, so a Python project's .env still runs every other call.
-readonly DOTENV_AUTH_KEYS="REQUESTS_CA_BUNDLE CURL_CA_BUNDLE BASH_ENV SHELLOPTS PS4 NO_GCE_CHECK TMPDIR"
+readonly DOTENV_AUTH_KEYS="REQUESTS_CA_BUNDLE CURL_CA_BUNDLE BASH_ENV SHELLOPTS PS4 NO_GCE_CHECK TMPDIR BROWSER DISPLAY WAYLAND_DISPLAY MIR_SOCKET GNOME_DESKTOP_SESSION_ID KDE_FULL_SESSION TERM"
 readonly DOTENV_AUTH_PREFIXES="CLOUDSDK_ PYTHON LD_ DYLD_ OPENSSL_ GOOGLE_CLOUD_ GOOGLE_API_ GCLOUD_ GCE_METADATA_"
 
 # jq definitions shared by every query of accounts.json. `token` turns an
@@ -163,26 +176,30 @@ real_command() {
     # this is where the .env gws would load is checked, for subcommand $2.
     # Then neutralise what that .env could supply, by exporting in this
     # process, so no value becomes an argument (a proxy URL can carry a
-    # password): a DOTENV_PROXY_PAIRS pair the caller set one name of gets that
-    # value in its unset twin, a pair the caller set neither name of is
-    # emptied, and each unset DOTENV_NEUTRAL_KEYS key is emptied.
+    # password): a DOTENV_PROXY_PAIRS pair whose value dotenvy would keep for
+    # one name gets that value in its twin, a pair it would keep for neither
+    # is emptied, and each DOTENV_NEUTRAL_KEYS key it would not keep is
+    # emptied.
     # sh names the pid real gws runs in as handed the call. That pid is this
     # wrapper's for an exec and a child's otherwise; sh knows its own where
     # bash 3.2 has no $BASHPID, and its exec keeps it.
     local real_gws="$1" name pair upper lower
     reject_redirecting_dotenv "${2:-}"
+    snapshot_exported
     for pair in $DOTENV_PROXY_PAIRS; do
         upper="${pair%:*}" lower="${pair#*:}"
-        if [[ -n "${!upper+set}" && -z "${!lower+set}" ]]; then
+        # dotenvy_keeps, not merely "set": a value dotenvy would replace is
+        # not the caller's to preserve.
+        if dotenvy_keeps "$upper" && ! dotenvy_keeps "$lower"; then
             export "$lower=${!upper}"
-        elif [[ -z "${!upper+set}" && -n "${!lower+set}" ]]; then
+        elif ! dotenvy_keeps "$upper" && dotenvy_keeps "$lower"; then
             export "$upper=${!lower}"
-        elif [[ -z "${!upper+set}" ]]; then
+        elif ! dotenvy_keeps "$upper"; then
             export "$upper=" "$lower="
         fi
     done
     for name in $DOTENV_NEUTRAL_KEYS; do
-        [[ -n "${!name+set}" ]] || export "$name="
+        dotenvy_keeps "$name" || export "$name="
     done
     REAL_COMMAND=(env -u GWS_ACCOUNTS_REENTRY)
     for name in $(compgen -v); do
@@ -340,8 +357,9 @@ reject_unselected_credentials() {
 
 dotenv_file() {
     # DOTENV := the .env gws would load, or "". gws calls dotenvy::dotenv(),
-    # which takes the first regular file named .env in the working directory
-    # (the physical path, from getcwd), then in each parent up to /.
+    # whose finder takes the first regular file named .env in the working
+    # directory (the physical path, from getcwd), then in each parent up to /
+    # (find.rs:33-57).
     local dir candidate
     DOTENV=""
     # Command substitution strips trailing newlines, and a directory name may
@@ -352,27 +370,187 @@ dotenv_file() {
     dir="${dir%$'\nx'}"
     while :; do
         candidate="${dir%/}/.env"
-        if [[ -f "$candidate" ]]; then
-            DOTENV="$candidate"
-            return 0
-        fi
+        case "$(candidate_state "$candidate")" in
+            file) DOTENV="$candidate"; return 0 ;;
+            # Any metadata error but NotFound ends dotenvy's search with no
+            # file loaded at all, so the wrapper loads none either
+            # (find.rs:42-46).
+            error) return 0 ;;
+            # NotFound, or something that is not a regular file, such as a
+            # directory named .env: dotenvy keeps walking, so this does too.
+            *) ;;
+        esac
         [[ "$dir" != / ]] || return 0
         dir="${dir%/*}"
         [[ -n "$dir" ]] || dir=/
     done
 }
 
+candidate_state() {
+    # What fs::metadata would say about $1: file, absent (NotFound), other (it
+    # exists and is not a regular file), or error. [[ -f ]] and [[ -e ]] follow
+    # symlinks and are false for both an absent target and a symlink loop, so
+    # a chain that does not resolve within the kernel's 40 links is the loop
+    # metadata reports as ELOOP. A metadata error this cannot tell from
+    # NotFound, such as a directory the caller may not search, keeps the walk
+    # going where dotenvy would stop: that refuses more, never less.
+    local path="$1" hops=0 target
+    if [[ -f "$path" ]]; then printf 'file\n'; return 0; fi
+    if [[ -e "$path" ]]; then printf 'other\n'; return 0; fi
+    while [[ -L "$path" ]]; do
+        hops=$((hops + 1))
+        if [[ "$hops" -gt 40 ]]; then printf 'error\n'; return 0; fi
+        target="$(readlink "$path" && printf x)" || { printf 'error\n'; return 0; }
+        target="${target%$'\nx'}"
+        [[ "$target" == /* ]] || target="${path%/*}/$target"
+        path="$target"
+    done
+    printf 'absent\n'
+}
+
+utf8_valid() {
+    # dotenvy keeps an inherited value only when std::env::var reads it, which
+    # needs valid UTF-8 (iter.rs:34). jq replaces every invalid byte with
+    # U+FFFD, so a value that comes back unchanged is the valid one. The x
+    # keeps the value's own trailing newlines, which $( ) would strip.
+    local decoded
+    require_jq
+    decoded="$(printf '%sx' "$1" | jq -Rsr . 2>/dev/null)" || return 1
+    [[ "$decoded" == "${1}x" ]]
+}
+
+snapshot_exported() {
+    # EXPORTED := the names in the environment real gws will inherit, between
+    # spaces. Only an exported name counts: bash gives itself shell variables
+    # such as PS4, SHELLOPTS and TERM that gws never sees. Taken afresh each
+    # time, since a tier launch exports its six before the check runs.
+    EXPORTED=" $(compgen -e | tr '\n' ' ')"
+}
+
+dotenvy_keeps() {
+    # True when dotenvy would leave the caller's value for $1 alone, so the
+    # .env cannot supply that key. An empty value counts; invalid UTF-8 does
+    # not, because dotenvy replaces such a value from the file.
+    case "$EXPORTED" in *" $1 "*) ;; *) return 1 ;; esac
+    utf8_valid "${!1}"
+}
+
+dotenv_assigned_keys() {
+    # Print, one per line and in order, the keys dotenvy would set from file
+    # $1. It reads logical lines, not physical ones: a quoted value runs on
+    # until its quote closes (iter.rs:84-179), and loading stops at the first
+    # line it cannot parse (iter.rs:32-35), so text inside a value and
+    # anything after a bad line set nothing. Values are parsed only as far as
+    # finding the key, and never printed. The one difference left from
+    # dotenvy: a value whose own parse fails (parse.rs:69) stops it, where
+    # this still reports the key, which refuses more rather than less.
+    jq -Rsr '
+        # The codepoints Rust'"'"'s char::is_whitespace matches.
+        def ws: [9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,
+                 8198,8199,8200,8201,8202,8232,8233,8239,8287,12288];
+        def lstrip: . as $c | ($c | length) as $n
+            | (first(range(0; $n) | . as $i | select((ws | index($c[$i])) == null)) // $n) as $start
+            | $c[$start:];
+        def rstrip: . as $c
+            | (last(range(0; $c | length) | . as $i | select((ws | index($c[$i])) == null)) // -1) as $end
+            | $c[0:$end + 1];
+        # eval_end_state (iter.rs:84-123) over one physical line.
+        def eval_end($state; $cs):
+            reduce range(0; $cs | length) as $i ({pos: 0, state: $state, done: false};
+                if .done then .
+                else .pos = $i
+                    | $cs[$i] as $c
+                    | if .state == "WhiteSpace" then
+                        if $c == 35 then .state = "Comment" | .done = true
+                        elif $c == 92 then .state = "Escape"
+                        elif $c == 34 then .state = "WeakOpen"
+                        elif $c == 39 then .state = "StrongOpen"
+                        else .state = "Complete" end
+                    elif .state == "Escape" then .state = "Complete"
+                    elif .state == "Complete" then
+                        if (ws | index($c)) != null and $c != 10 and $c != 13 then .state = "WhiteSpace"
+                        elif $c == 92 then .state = "Escape"
+                        elif $c == 34 then .state = "WeakOpen"
+                        elif $c == 39 then .state = "StrongOpen"
+                        else .state = "Complete" end
+                    elif .state == "WeakOpen" then
+                        if $c == 92 then .state = "WeakOpenEscape"
+                        elif $c == 34 then .state = "Complete"
+                        else .state = "WeakOpen" end
+                    elif .state == "WeakOpenEscape" then .state = "WeakOpen"
+                    elif .state == "StrongOpen" then
+                        if $c == 92 then .state = "StrongOpenEscape"
+                        elif $c == 39 then .state = "Complete"
+                        else .state = "StrongOpen" end
+                    else .state = "StrongOpen" end
+                end);
+        # parse_key (parse.rs:76-94): an ASCII letter or _, then letters,
+        # digits, _ and . ; null when the first character cannot start a key.
+        def take_key($cs):
+            if ($cs | length) == 0 then null
+            elif ($cs[0] | [.] | implode | test("^[A-Za-z_]$")) then
+                ($cs | length) as $n
+                | (first(range(0; $n)
+                    | select(($cs[.] | [.] | implode | test("^[A-Za-z0-9_.]$")) | not)) // $n) as $i
+                | {key: ($cs[0:$i] | implode), rest: $cs[$i:]}
+            else null end;
+        # parse_line (parse.rs:41-74): the key of an assignment, "" for a
+        # blank or comment line, and null when dotenvy stops here.
+        def parse_line($cs0):
+            ($cs0 | rstrip | lstrip) as $cs
+            | if ($cs | length) == 0 or $cs[0] == 35 then ""
+            else take_key($cs) as $k
+                | if $k == null then null
+                else ($k.rest | lstrip) as $rest
+                    | if $k.key == "export" and (($rest | length) == 0 or $rest[0] != 61) then
+                        take_key($rest) as $k2
+                        | if $k2 == null then null
+                        else ($k2.rest | lstrip) as $r2
+                            | if ($r2 | length) > 0 and $r2[0] == 61 then $k2.key else null end
+                        end
+                    elif ($rest | length) > 0 and $rest[0] == 61 then $k.key
+                    else null end
+                end
+            end;
+        # remove_bom (iter.rs:58-66), then the physical lines, each keeping
+        # the newline the state machine reads.
+        ltrimstr("\ufeff") as $text
+        | ($text | split("\n")) as $raw
+        | ($raw | length) as $n
+        | [range(0; $n) | if . == $n - 1 then $raw[.] else $raw[.] + "\n" end]
+        | map(select(. != ""))
+        # QuotedLines (iter.rs:125-179): join physical lines into logical ones.
+        | reduce .[] as $line ({buf: "", state: "Complete", out: []};
+            (.buf + $line) as $joined
+            | if (($joined | explode | lstrip | implode) | startswith("#")) then
+                .out += [""] | .buf = "" | .state = "Complete"
+            else (.buf | explode | length) as $bufpos
+                | eval_end(.state; ($line | explode)) as $r
+                | if $r.state == "Complete" then
+                    .out += [$joined | sub("\r?\n$"; "")] | .buf = "" | .state = "Complete"
+                elif $r.state == "Comment" then
+                    .out += [$joined | explode | .[0:$bufpos + $r.pos] | implode]
+                    | .buf = "" | .state = "Complete"
+                else .buf = $joined | .state = $r.state end
+            end)
+        | .out
+        # Keys, in order, stopping where dotenvy stops.
+        | . as $lines
+        | [range(0; $lines | length) | parse_line($lines[.] | explode)] as $parsed
+        | (first(range(0; $parsed | length) | select($parsed[.] == null)) // ($parsed | length)) as $stop
+        | $parsed[0:$stop] | map(select(. != "")) | .[]
+    ' <"$1"
+}
+
 reject_redirecting_dotenv() {
     # Refuse when the .env gws would load sets a key the launch cannot
-    # neutralise, and the environment does not already set it: dotenvy never
-    # overrides a set variable, even an empty one. An auth call ($1 = auth),
-    # which starts gcloud, also refuses the keys that child reads. The variables
-    # a tier launch assigns are set by then, and so exempt. Keys are read the
-    # way dotenvy reads them: after a leading byte order mark, each line is
-    # optional whitespace, an optional `export` and whitespace, the key,
-    # optional whitespace, then =. A # line is a comment. Values are never read
-    # into the wrapper.
-    local keys all_keys="$DOTENV_REFUSE_KEYS" all_prefixes="$DOTENV_REFUSE_PREFIXES"
+    # neutralise, and dotenvy would not keep the caller's value. An auth call
+    # ($1 = auth), which starts gcloud, also refuses the keys that child reads.
+    # The variables a tier launch assigns are set by then, and so exempt.
+    # Values are never read into the wrapper.
+    local all_keys="$DOTENV_REFUSE_KEYS" all_prefixes="$DOTENV_REFUSE_PREFIXES"
+    local key prefix protected found=""
+    snapshot_exported
     if [[ "${1:-}" == auth ]]; then
         all_keys="$all_keys $DOTENV_AUTH_KEYS"
         all_prefixes="$all_prefixes $DOTENV_AUTH_PREFIXES"
@@ -380,18 +558,21 @@ reject_redirecting_dotenv() {
     dotenv_file
     [[ -n "$DOTENV" && -r "$DOTENV" ]] || return 0
     require_jq
-    keys="$(jq -Rsr --arg keys "$all_keys" --arg prefixes "$all_prefixes" '
-        ($keys | split(" ")) as $refuse
-        | ($prefixes | split(" ")) as $prefixed
-        | [ltrimstr("\ufeff") | split("\n")[]
-            | capture("^\\s*(?:export\\s+)?(?<key>[A-Za-z_][A-Za-z0-9_.]*)\\s*=")
-            | .key
-            | select(. as $key
-                | ($refuse | index([$key]))
-                  or any($prefixed[]; . as $p | $key | startswith($p)))
-            | select(. as $key | $ENV | has($key) | not)]
-        | unique | join(", ")' <"$DOTENV")" || die "cannot read $DOTENV, the .env gws would load"
-    [[ -z "$keys" ]] || die "$DOTENV sets $keys. gws loads that file and would use it to choose where this call goes, what it trusts, or what it records. Remove those lines from $DOTENV, or run gws from a directory outside it."
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        protected=""
+        case " $all_keys " in *" $key "*) protected=yes ;; esac
+        if [[ -z "$protected" ]]; then
+            for prefix in $all_prefixes; do
+                if [[ "$key" == "$prefix"* ]]; then protected=yes; break; fi
+            done
+        fi
+        [[ -n "$protected" ]] || continue
+        dotenvy_keeps "$key" && continue
+        case " $found " in *" $key,"* | *" $key "*) continue ;; esac
+        found="${found:+$found, }$key"
+    done < <(dotenv_assigned_keys "$DOTENV")
+    [[ -z "$found" ]] || die "$DOTENV sets $found. gws loads that file and would use it to choose where this call goes, what it trusts, or what it records. Remove those lines from $DOTENV, or run gws from a directory outside it."
 }
 
 stored_login() {
