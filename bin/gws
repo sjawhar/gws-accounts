@@ -13,29 +13,43 @@ readonly ACCOUNTS_ROOT="${HOME}/.config/gws"
 readonly ACCOUNTS_FILE="${ACCOUNTS_ROOT}/accounts.json"
 readonly DEFAULT_TIER=read
 
-# What a .env gws loads must never choose for it. gws loads .env itself and
-# cannot be told not to, so a call is refused while the file it would load sets
-# one of these and the environment does not already.
+# What a .env gws loads must never choose for it. gws loads the nearest .env
+# itself and cannot be told not to, filling every variable the environment
+# leaves unset, so whoever can write a .env above the working directory would
+# otherwise choose where a credential-carrying call goes, what it trusts, or
+# what it records.
 #
-# Every gws setting (GOOGLE_WORKSPACE_*): the wrapper picks gws's credentials,
-# store and configuration, so a project's .env never supplies one. One of them,
-# GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE (gws 0.22.5 main.rs:192-201), makes gws
-# POST every response body, with the bearer token, to a host the value names.
-# GOOGLE_APPLICATION_CREDENTIALS (auth.rs:105,404) is the same kind of setting
-# under another name. The rest redirect the call, change what it trusts, or
-# record it:
+# A key whose empty value turns its effect off is neutralised, not refused:
+# the launch passes it empty when the caller has not set it, and gws keeps
+# what the environment already holds. An ordinary project .env with a proxy
+# setting then runs, instead of being refused. Measured against real gws
+# 0.22.5 with each key set empty: the call reached Google in every case below.
 #   the proxy variables reqwest reads (hyper-util 0.1.20 matcher.rs:230-234),
-#   REQUEST_METHOD, which turns proxying off and so hides a proxy's absence
-#     (matcher.rs:230,305-311),
-#   SSL_CERT_FILE and SSL_CERT_DIR, the roots gws trusts
-#     (rustls-native-certs 0.8.3 lib.rs:198-208,361-362),
-#   SSLKEYLOGFILE, which writes the TLS session keys of every call
-#     (rustls 0.23.37 key_log_file.rs:88-91),
+#   SSLKEYLOGFILE, which rustls writes TLS session keys to when a program
+#     turns its key log on (rustls 0.23.37 key_log_file.rs:88-91; gws never
+#     does, so this is defence in depth),
 #   HOME and XDG_CONFIG_HOME, which move the store, the token cache and the
 #     well-known ADC file (dirs-sys 0.4.1 lib.rs:34, dirs 5.0.1 lin.rs:9),
-#   TMPDIR, where gws writes each credential it saves (fs_util.rs:35).
-readonly DOTENV_REDIRECT_KEYS="HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy REQUEST_METHOD SSL_CERT_FILE SSL_CERT_DIR SSLKEYLOGFILE HOME XDG_CONFIG_HOME TMPDIR GOOGLE_APPLICATION_CREDENTIALS"
-readonly DOTENV_REDIRECT_PREFIXES="GOOGLE_WORKSPACE_"
+#   TMPDIR, where gws writes each credential it saves (fs_util.rs:35),
+#   GOOGLE_APPLICATION_CREDENTIALS, the ADC path (auth.rs:105,404).
+readonly DOTENV_NEUTRAL_KEYS="HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy SSLKEYLOGFILE HOME XDG_CONFIG_HOME TMPDIR GOOGLE_APPLICATION_CREDENTIALS"
+
+# A call is refused when the .env sets one of these and the environment does
+# not, because no value of theirs is both neutral and safe:
+#   SSL_CERT_FILE and SSL_CERT_DIR name the roots gws trusts, and an empty
+#     value is still Some(""), so the platform store is skipped
+#     (rustls-native-certs 0.8.3 lib.rs:198-208,361-362). Measured: emptying
+#     either one breaks TLS, and gws fails with error[discovery].
+#   REQUEST_METHOD turns proxying off entirely (matcher.rs:230,305-311), so
+#     emptying it would itself cancel a proxy the caller set. Measured: with
+#     HTTPS_PROXY set and REQUEST_METHOD empty, gws ignored the proxy.
+#   GOOGLE_WORKSPACE_ names every gws setting, and the wrapper, not a project,
+#     chooses gws's credentials and configuration. One of them,
+#     GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE (main.rs:192-201), makes gws POST
+#     every response body, with the bearer token, to a host the value names;
+#     emptying it warns on each successful call instead.
+readonly DOTENV_REFUSE_KEYS="SSL_CERT_FILE SSL_CERT_DIR REQUEST_METHOD"
+readonly DOTENV_REFUSE_PREFIXES="GOOGLE_WORKSPACE_"
 
 # gws auth starts gcloud as a child (setup.rs:444-447,777 through
 # auth_commands.rs:782,1441), which inherits what gws loaded from .env. gcloud
@@ -45,17 +59,16 @@ readonly DOTENV_REDIRECT_PREFIXES="GOOGLE_WORKSPACE_"
 # (requests sessions.py:764-771), its TLS key log from SSLKEYLOGFILE (urllib3
 # ssl_.py:322-327) and its metadata host from GCE_METADATA_* (google-auth
 # _metadata.py:53-57,94). Being Python and sh, it also honours PYTHON*, the
-# loader's LD_*/DYLD_*, OPENSSL_*, and bash's BASH_ENV, SHELLOPTS and PS4. Only
-# an auth call is refused for these, so a Python project's .env still runs
-# every other call.
+# loader's LD_*/DYLD_*, OPENSSL_*, and bash's BASH_ENV, SHELLOPTS and PS4.
+# These are refused rather than neutralised, since each belongs to a program
+# the wrapper does not launch and cannot measure. Only an auth call is refused
+# for them, so a Python project's .env still runs every other call.
 readonly DOTENV_AUTH_KEYS="REQUESTS_CA_BUNDLE CURL_CA_BUNDLE BASH_ENV SHELLOPTS PS4 NO_GCE_CHECK"
 readonly DOTENV_AUTH_PREFIXES="CLOUDSDK_ PYTHON LD_ DYLD_ OPENSSL_ GOOGLE_CLOUD_ GOOGLE_API_ GCLOUD_ GCE_METADATA_"
 
-# The six run_materialized assigns for gws on a tier call. gws takes each from
-# that assignment, so no .env can supply one, and a GCP project's .env naming
-# GOOGLE_APPLICATION_CREDENTIALS still runs its tier calls. Every other route
-# leaves them unset, where gws would read the .env, so only the tier route
-# exempts them.
+# The six run_materialized assigns itself for a tier call, after real_command
+# builds the launch. real_command must not pass them as well: env applies its
+# own assignments last, and would override the credential with an empty value.
 readonly DOTENV_TIER_LAUNCH_KEYS="GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_APPLICATION_CREDENTIALS GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_WORKSPACE_CLI_CONFIG_DIR GOOGLE_WORKSPACE_CLI_CLIENT_ID GOOGLE_WORKSPACE_CLI_CLIENT_SECRET"
 
 # jq definitions shared by every query of accounts.json. `token` turns an
@@ -137,17 +150,26 @@ find_real_gws() {
 
 real_command() {
     # REAL_COMMAND := real gws $1 behind env, which drops the re-entry marker
-    # and every GWS_*_OAUTH variable. run_materialized passes the selected
-    # credential as either a 0600 JSON file or GOOGLE_WORKSPACE_CLI_TOKEN.
+    # and every GWS_*_OAUTH variable, and passes each DOTENV_NEUTRAL_KEYS key
+    # the caller left unset as empty, so the .env gws loads cannot supply one.
+    # A key the caller did set is left alone, and so keeps its value. $2 names
+    # the keys the caller assigns itself after this returns; passing them here
+    # too would override that assignment, since env applies its own last.
+    # run_materialized passes the selected credential as either a 0600 JSON
+    # file or GOOGLE_WORKSPACE_CLI_TOKEN.
     # sh names the pid real gws runs in as handed the call. That pid is this
     # wrapper's for an exec and a child's otherwise; sh knows its own where
     # bash 3.2 has no $BASHPID, and its exec keeps it.
-    local real_gws="$1" name
+    local real_gws="$1" assigned=" ${2:-} " name
     REAL_COMMAND=(env -u GWS_ACCOUNTS_REENTRY)
     for name in $(compgen -v); do
         case "$name" in
             GWS_*_OAUTH) REAL_COMMAND+=(-u "$name") ;;
         esac
+    done
+    for name in $DOTENV_NEUTRAL_KEYS; do
+        [[ -z "${!name+set}" && "$assigned" != *" $name "* ]] || continue
+        REAL_COMMAND+=("$name=")
     done
     REAL_COMMAND+=(/bin/sh -c 'GWS_ACCOUNTS_HANDED="$$ $0"; export GWS_ACCOUNTS_HANDED; exec "$@"'
         "${HANDED:+$HANDED:}$real_gws" "$real_gws")
@@ -303,7 +325,11 @@ dotenv_file() {
     # (the physical path, from getcwd), then in each parent up to /.
     local dir candidate
     DOTENV=""
-    dir="$(pwd -P)" || return 0
+    # Command substitution strips trailing newlines, and a directory name may
+    # end in one, so a sentinel keeps the name exactly. cd -P would work too,
+    # but it would also move the wrapper to the physical path.
+    dir="$(pwd -P; printf x)" || return 0
+    dir="${dir%$'\nx'}"
     while :; do
         candidate="${dir%/}/.env"
         if [[ -f "$candidate" ]]; then
@@ -317,32 +343,31 @@ dotenv_file() {
 }
 
 reject_redirecting_dotenv() {
-    # Refuse when the .env gws would load sets a key this call must choose, and
-    # the environment does not already set it: dotenvy never overrides a set
-    # variable, even an empty one. An auth call, which starts gcloud, also
-    # refuses the keys that child reads; a tier call exempts the six its launch
-    # assigns. Keys are read the way dotenvy reads them: after a leading byte
-    # order mark, each line is optional whitespace, an optional `export` and
-    # whitespace, the key, optional whitespace, then =. A # line is a comment.
-    # Values are never read into the wrapper.
-    local keys all_keys="$DOTENV_REDIRECT_KEYS" all_prefixes="$DOTENV_REDIRECT_PREFIXES" exempt=""
+    # Refuse when the .env gws would load sets a key the launch cannot
+    # neutralise, and the environment does not already set it: dotenvy never
+    # overrides a set variable, even an empty one. An auth call, which starts
+    # gcloud, also refuses the keys that child reads. Keys are read the way
+    # dotenvy reads them: after a leading byte order mark, each line is
+    # optional whitespace, an optional `export` and whitespace, the key,
+    # optional whitespace, then =. A # line is a comment. Values are never
+    # read into the wrapper.
+    local keys all_keys="$DOTENV_REFUSE_KEYS" all_prefixes="$DOTENV_REFUSE_PREFIXES"
     if [[ "${1:-}" == auth ]]; then
         all_keys="$all_keys $DOTENV_AUTH_KEYS"
         all_prefixes="$all_prefixes $DOTENV_AUTH_PREFIXES"
     fi
-    [[ "${2:-}" != tier ]] || exempt="$DOTENV_TIER_LAUNCH_KEYS"
     dotenv_file
     [[ -n "$DOTENV" && -r "$DOTENV" ]] || return 0
     require_jq
-    keys="$(jq -Rsr --arg keys "$all_keys" --arg prefixes "$all_prefixes" --arg exempt "$exempt" '
-        (($keys | split(" ")) - ($exempt | split(" "))) as $redirect
+    keys="$(jq -Rsr --arg keys "$all_keys" --arg prefixes "$all_prefixes" '
+        ($keys | split(" ")) as $refuse
         | ($prefixes | split(" ")) as $prefixed
         | [ltrimstr("\ufeff") | split("\n")[]
             | capture("^\\s*(?:export\\s+)?(?<key>[A-Za-z_][A-Za-z0-9_.]*)\\s*=")
             | .key
             | select(. as $key
-                | ($redirect | index([$key]))
-                  or any($prefixed[]; . as $p | ($key | startswith($p)) and (($exempt | split(" ")) | index([$key]) | not)))
+                | ($refuse | index([$key]))
+                  or any($prefixed[]; . as $p | $key | startswith($p)))
             | select(. as $key | $ENV | has($key) | not)]
         | unique | join(", ")' <"$DOTENV")" || die "cannot read $DOTENV, the .env gws would load"
     [[ -z "$keys" ]] || die "$DOTENV sets $keys. gws loads that file and would use it to choose where this call goes, what it trusts, or what it records. Remove those lines from $DOTENV, or run gws from a directory outside it."
@@ -369,7 +394,7 @@ run_materialized() {
     local real_gws="$1" key="$2" store="$3" value token="" creds_file="" client_id="" client_secret="" rc=0
     local json='^[[:space:]]*[{]'
     shift 3
-    reject_redirecting_dotenv "$(first_arg "$@")" tier
+    reject_redirecting_dotenv "$(first_arg "$@")"
     value="${!key}"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$TMP_DIR"' EXIT
@@ -389,7 +414,7 @@ run_materialized() {
         token="$value" store=""
     fi
     [[ -n "$store" ]] || store="${TMP_DIR}/store"
-    real_command "$real_gws"
+    real_command "$real_gws" "$DOTENV_TIER_LAUNCH_KEYS"
     # Credentials reach real gws as prefix assignments, which go into its
     # environment; arguments to env would show them in ps. Every source is
     # assigned on both routes, and one this route must not use is set empty,
@@ -565,7 +590,7 @@ $(list_tiers "$ACCOUNT")"
     reject_unselected_credentials "$key" "$tier"
     # Before the tier command releases a credential. run_materialized checks
     # again before gws runs, in case the tier command changed the directory.
-    reject_redirecting_dotenv "$cmd" tier
+    reject_redirecting_dotenv "$cmd"
     if [[ -n "${!key:-}" ]]; then
         run_materialized "$real_gws" "$key" "$store" "$@"
     fi

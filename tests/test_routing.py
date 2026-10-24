@@ -31,9 +31,20 @@ echo "CLIENT_SECRET=${GOOGLE_WORKSPACE_CLI_CLIENT_SECRET:-}"
 # gws loads a .env for each variable left unset, so the wrapper blanks a source it must
 # keep from gws instead of unsetting it; EMPTY lists the credential variables set empty.
 empty=""
+neutral=""
+set_nonempty=""
 for v in GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_APPLICATION_CREDENTIALS GOOGLE_WORKSPACE_CLI_CLIENT_ID GOOGLE_WORKSPACE_CLI_CLIENT_SECRET; do
   if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then empty="$empty $v"; fi
 done
+# NEUTRAL lists the keys the launch passes empty so gws cannot take them from a .env;
+# SET lists any of them the caller set, which the launch leaves alone.
+for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy \
+  SSLKEYLOGFILE XDG_CONFIG_HOME TMPDIR GOOGLE_APPLICATION_CREDENTIALS; do
+  if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then neutral="$neutral $v"; fi
+  if [ -n "${!v:-}" ]; then set_nonempty="$set_nonempty $v=${!v}"; fi
+done
+echo "NEUTRAL=${neutral# }"
+echo "SET=${set_nonempty# }"
 if [ -n "${STUB_TOKEN_SCAN_DIR:-}" ]; then
   PYTHON -c 'import os, pathlib, sys
 token = os.environ["GOOGLE_WORKSPACE_CLI_TOKEN"].encode()
@@ -482,10 +493,11 @@ class Routing(unittest.TestCase):
 
     # A .env that would redirect gws
 
-    def test_parent_dotenv_setting_a_proxy_is_refused_on_both_routes(self):
+    def test_parent_dotenv_proxy_is_neutralized_on_every_credential_route(self):
+        # Emptying a proxy variable turns it off, so the call runs and gws cannot read the
+        # .env's value: an ordinary project .env with a proxy setting is not refused.
         proxy = "http://dotenv-proxy.invalid:3128"
-        work = self.dotenv_tree(f"APP_ENV=dev\nHTTPS_PROXY={proxy}\n")
-        dotenv = self.root / "project" / ".env"
+        work = self.dotenv_tree(f"APP_ENV=dev\nHTTPS_PROXY={proxy}\nNO_PROXY=localhost\n")
         cases = {
             "json via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read")},
             "bare token via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
@@ -495,22 +507,29 @@ class Routing(unittest.TestCase):
         for name, env in cases.items():
             with self.subTest(name):
                 result = self.run_gws({"GWS_ACCOUNT": "personal", **env}, cwd=work)
-                self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(dotenv), "HTTPS_PROXY")
-                for value in (proxy, "fixture-bearer-value", "personal-read-client-secret"):
-                    self.assertNotIn(value, result.stderr)
-                    self.assertNotIn(value, result.stdout)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                neutral = fields(result.stdout)["NEUTRAL"].split()
+                self.assertIn("HTTPS_PROXY", neutral)
+                self.assertIn("NO_PROXY", neutral)
+                self.assertNotIn(proxy, result.stdout)
+
+    def test_a_proxy_the_caller_set_survives_the_neutralizing(self):
+        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        result = self.run_gws({"GWS_ACCOUNT": "personal", "HTTPS_PROXY": "http://corp-proxy.example:3128",
+                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("HTTPS_PROXY=http://corp-proxy.example:3128", fields(result.stdout)["SET"])
 
     def test_dotenv_forms_dotenvy_loads_are_refused(self):
         cases = {
             "export prefix": ("export SSL_CERT_FILE=/srv/evil/ca.pem\n", "SSL_CERT_FILE"),
-            "spaces around the key": ("  https_proxy  =  http://x.invalid\n", "https_proxy"),
-            "tab after export": ("export\tALL_PROXY=socks5://x.invalid\n", "ALL_PROXY"),
-            "byte order mark": ("\ufeffHTTP_PROXY=http://x.invalid\n", "HTTP_PROXY"),
-            "unicode whitespace": ("\u00a0NO_PROXY\u00a0=*\n", "NO_PROXY"),
+            "spaces around the key": ("  SSL_CERT_DIR  =  /srv/evil/certs\n", "SSL_CERT_DIR"),
+            "tab after export": ("export\tREQUEST_METHOD=GET\n", "REQUEST_METHOD"),
+            "byte order mark": ("\ufeffGOOGLE_WORKSPACE_CLI_LOG=gws=trace\n", "GOOGLE_WORKSPACE_CLI_LOG"),
+            "unicode whitespace": ("\u00a0SSL_CERT_FILE\u00a0=/srv/evil/ca.pem\n", "SSL_CERT_FILE"),
             "empty value": ("SSL_CERT_DIR=\n", "SSL_CERT_DIR"),
-            "log filter": ("GOOGLE_WORKSPACE_CLI_LOG=gws=trace\n", "GOOGLE_WORKSPACE_CLI_LOG"),
             "log file": ("GOOGLE_WORKSPACE_CLI_LOG_FILE=/srv/evil/logs\n", "GOOGLE_WORKSPACE_CLI_LOG_FILE"),
-            "no final newline": ("APP=1\nno_proxy=*", "no_proxy"),
+            "no final newline": ("APP=1\nSSL_CERT_FILE=/srv/evil/ca.pem", "SSL_CERT_FILE"),
         }
         for name, (text, key) in cases.items():
             with self.subTest(name):
@@ -576,22 +595,49 @@ class Routing(unittest.TestCase):
                 self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                 self.assertNotIn("projects/evil", result.stderr)
 
-    def test_dotenv_keys_from_the_audit_are_refused(self):
-        # HOME is left out: the wrapper needs it to find accounts.json, so a call without it
-        # fails before the check. It stays in the refusal list, which costs nothing.
-        for key in ("REQUEST_METHOD", "SSLKEYLOGFILE", "XDG_CONFIG_HOME", "TMPDIR", "PATH"):
+    def test_audited_keys_are_neutralized_or_refused_as_measured(self):
+        # Each key was measured against real gws 0.22.5 with an empty value. The ones an
+        # empty value turns off are passed empty; the ones it breaks or misleads are refused.
+        neutralized = ("SSLKEYLOGFILE", "XDG_CONFIG_HOME", "TMPDIR", "GOOGLE_APPLICATION_CREDENTIALS")
+        refused = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUEST_METHOD")
+        for key in neutralized + refused + ("PATH",):
             with self.subTest(key=key):
                 work = self.root / key.lower()
                 work.mkdir()
                 (work / ".env").write_text(f"{key}=/srv/evil\n", encoding="utf-8")
                 result = self.run_gws({"GWS_ACCOUNT": "personal",
                                        "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
-                                      cwd=work, unset=(key,) if key != "PATH" else ())
-                if key == "PATH":
-                    # PATH is always set, so gws never takes it from .env: this call runs.
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                                      cwd=work, unset=(key,) if key in neutralized else ())
+                if key in refused:
+                    self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                     continue
-                self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
+                # PATH is always set, so gws never takes it from .env.
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("/srv/evil", result.stdout)
+                if key != "PATH":
+                    self.assertIn(key, fields(result.stdout)["NEUTRAL"].split())
+
+    def test_a_working_directory_whose_name_ends_in_a_newline_is_not_a_way_past(self):
+        # Command substitution strips trailing newlines, so a wrapper that read the working
+        # directory that way would search the parent instead and miss this .env.
+        work = self.root / "newline-project\n"
+        work.mkdir()
+        (work / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
+        result = self.run_gws({"GWS_ACCOUNT": "personal",
+                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+        self.assert_rejected_before_gws_or_secrets(result, 1, "SSL_CERT_FILE")
+        self.assertIn(os.path.realpath(work / ".env"), result.stderr)
+
+    def test_a_tier_command_cannot_reach_a_refused_dotenv_by_changing_directory(self):
+        # The pre-command check saw the caller's directory; this one is the check inside the
+        # launch, which sees the directory the tier command moved to.
+        hostile = self.root / "hostile"
+        hostile.mkdir()
+        (hostile / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
+        self.write_accounts({"personal": {"tiers": {"read": {
+            "command": ["sh", "-c", f'cd "{hostile}" && export GWS_PERSONAL_READ_OAUTH=fixture-bearer-value && exec "$@"', "sh"]}}}})
+        result = self.run_gws({"GWS_ACCOUNT": "personal"})
+        self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(hostile / ".env"), "SSL_CERT_FILE")
 
     def test_tier_launch_variables_in_dotenv_do_not_block_a_tier_call(self):
         # The tier launch sets these six for gws itself, so gws never reads them from .env.
@@ -624,15 +670,24 @@ class Routing(unittest.TestCase):
             ("no subcommand", {}, ["--version"]),
         )
 
-    def test_every_route_to_gws_is_refused_under_a_proxy_dotenv(self):
-        work = self.dotenv_tree("APP_ENV=dev\nHTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+    def test_every_route_to_gws_is_refused_under_a_cert_dotenv(self):
+        work = self.dotenv_tree("APP_ENV=dev\nSSL_CERT_FILE=/srv/evil/ca.pem\n")
         dotenv = os.path.realpath(self.root / "project" / ".env")
         for name, env, args in self.non_tier_routes():
             with self.subTest(name):
                 result = self.run_gws(env, args=args, cwd=work)
-                self.assert_rejected_before_gws_or_secrets(result, 1, dotenv, "HTTPS_PROXY")
-                self.assertNotIn("dotenv-proxy.invalid", result.stderr)
+                self.assert_rejected_before_gws_or_secrets(result, 1, dotenv, "SSL_CERT_FILE")
+                self.assertNotIn("/srv/evil", result.stderr)
                 self.assertNotIn("caller-bearer-value", result.stderr)
+
+    def test_every_route_to_gws_neutralizes_a_proxy_dotenv(self):
+        work = self.dotenv_tree("APP_ENV=dev\nHTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        for name, env, args in self.non_tier_routes():
+            with self.subTest(name):
+                result = self.run_gws(env, args=args, cwd=work)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("HTTPS_PROXY", fields(result.stdout)["NEUTRAL"].split())
+                self.assertNotIn("dotenv-proxy.invalid", result.stdout)
 
     def test_every_route_to_gws_runs_under_an_ordinary_dotenv(self):
         # No PYTHONPATH here: an auth call refuses it, which its own test covers.
@@ -643,14 +698,15 @@ class Routing(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"ARG={args[0]}", result.stdout)
 
-    def test_stored_login_is_refused_under_a_dotenv_naming_application_credentials(self):
-        # Off the tier route nothing sets GOOGLE_APPLICATION_CREDENTIALS, so gws would read the
-        # .env's value for its quota project.
+    def test_stored_login_neutralizes_a_dotenv_naming_application_credentials(self):
+        # Off the tier route nothing assigns GOOGLE_APPLICATION_CREDENTIALS a value, so the
+        # launch passes it empty and gws cannot read the .env's path.
         self.store_login("plain@example.com")
         work = self.dotenv_tree("GOOGLE_APPLICATION_CREDENTIALS=/srv/project/sa.json\n")
         result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, cwd=work)
-        self.assert_rejected_before_gws_or_secrets(
-            result, 1, os.path.realpath(self.root / "project" / ".env"), "GOOGLE_APPLICATION_CREDENTIALS")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", fields(result.stdout)["NEUTRAL"].split())
+        self.assertNotIn("/srv/project", result.stdout)
         self.assertNotIn("/srv/project", result.stderr)
 
     def test_auth_call_is_refused_under_a_dotenv_gcloud_would_read(self):
