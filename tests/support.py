@@ -165,7 +165,7 @@ class Harness(unittest.TestCase):
         text = accounts if isinstance(accounts, str) else json.dumps(accounts)
         (self.gws_root / "accounts.json").write_text(text, encoding="utf-8")
 
-    def run_gws(self, env=None, args=None, cwd=None, unset=()) -> subprocess.CompletedProcess:
+    def run_gws(self, env=None, args=None, cwd=None) -> subprocess.CompletedProcess:
         # A session of its own, so a wrapper that loops fails the test at the timeout and leaves
         # no process behind, even where the loop runs in a child of the wrapper. The scratch
         # root is the default working directory, so no .env above the checkout reaches a test.
@@ -174,7 +174,7 @@ class Harness(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={k: v for k, v in {**self.env, **(env or {})}.items() if k not in unset},
+            env={**self.env, **(env or {})},
             cwd=cwd or self.root,
             start_new_session=True,
         )
