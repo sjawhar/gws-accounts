@@ -36,12 +36,13 @@ set_nonempty=""
 for v in GOOGLE_WORKSPACE_CLI_TOKEN GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE GOOGLE_APPLICATION_CREDENTIALS GOOGLE_WORKSPACE_CLI_CLIENT_ID GOOGLE_WORKSPACE_CLI_CLIENT_SECRET; do
   if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then empty="$empty $v"; fi
 done
-# NEUTRAL lists the keys gws receives set to empty, so it cannot take them from a .env;
-# SET lists any of them that arrive with a value.
-for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy \
-  SSLKEYLOGFILE XDG_CONFIG_HOME; do
-  if [ -n "${!v+set}" ] && [ -z "${!v}" ]; then neutral="$neutral $v"; fi
-  if [ -n "${!v:-}" ]; then set_nonempty="$set_nonempty $v=${!v}"; fi
+# NEUTRAL lists every exported variable gws receives set to empty; SET lists the proxy
+# variables that arrive with a value. Neither holds a copy of the wrapper's key lists.
+for v in $(compgen -e); do
+  if [ -z "${!v}" ]; then neutral="$neutral $v"; fi
+done
+for v in $(compgen -e | grep -i '_proxy$'); do
+  if [ -n "${!v}" ]; then set_nonempty="$set_nonempty $v=${!v}"; fi
 done
 echo "NEUTRAL=${neutral# }"
 echo "SET=${set_nonempty# }"
@@ -756,7 +757,8 @@ class Routing(unittest.TestCase):
                           ("LD_PRELOAD=/srv/evil/x.so\n", "LD_PRELOAD"),
                           ("BASH_ENV=/srv/evil/x.sh\n", "BASH_ENV"),
                           ("REQUESTS_CA_BUNDLE=/srv/evil/ca.pem\n", "REQUESTS_CA_BUNDLE"),
-                          ("GCE_METADATA_HOST=evil.invalid\n", "GCE_METADATA_HOST")):
+                          ("GCE_METADATA_HOST=evil.invalid\n", "GCE_METADATA_HOST"),
+                          ("TMPDIR=/srv/evil/tmp\n", "TMPDIR")):
             for account in ("personal", "plain@example.com"):
                 with self.subTest(key=key, account=account):
                     work = self.root / f"{key.lower()}-{account}"
@@ -765,6 +767,37 @@ class Routing(unittest.TestCase):
                     result = self.run_gws({"GWS_ACCOUNT": account}, args=["auth", "status"], cwd=work)
                     self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                     self.assertNotIn("/srv/evil", result.stderr)
+
+    def test_every_listed_key_is_handled_as_its_list_says(self):
+        # Read the lists from the wrapper itself, so a key added there is tested here without a
+        # second copy: refused keys and prefixes stop the call, neutral keys arrive empty.
+        def wrapper_list(name):
+            for line in WRAPPER.read_text(encoding="utf-8").splitlines():
+                if line.startswith(f'readonly {name}="'):
+                    return line.split('"')[1].split()
+            self.fail(f"bin/gws defines no {name}")
+        refused = wrapper_list("DOTENV_REFUSE_KEYS") + [p + "PROBE" for p in wrapper_list("DOTENV_REFUSE_PREFIXES")]
+        auth_refused = wrapper_list("DOTENV_AUTH_KEYS") + [p + "PROBE" for p in wrapper_list("DOTENV_AUTH_PREFIXES")]
+        neutral = wrapper_list("DOTENV_NEUTRAL_KEYS") + [
+            name for pair in wrapper_list("DOTENV_PROXY_PAIRS") for name in pair.split(":")]
+        # The stored-login route assigns nothing itself, so no key is exempt there.
+        self.store_login("plain@example.com")
+        cases = ([(key, ["drive", "files", "list"], "refused") for key in refused]
+                 + [(key, ["auth", "status"], "refused") for key in auth_refused]
+                 + [(key, ["drive", "files", "list"], "neutral") for key in neutral])
+        for index, (key, args, expect) in enumerate(cases):
+            with self.subTest(key=key, args=args[0]):
+                # Numbered, not named by key: macOS's filesystem folds HTTP_PROXY and http_proxy.
+                work = self.root / f"list-{index}"
+                work.mkdir()
+                (work / ".env").write_text(f"{key}=/srv/evil\n", encoding="utf-8")
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=args, cwd=work)
+                if expect == "refused":
+                    self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(key, fields(result.stdout)["NEUTRAL"].split())
+                self.assertNotIn("/srv/evil", result.stdout + result.stderr)
 
     def test_gcloud_keys_do_not_block_a_call_that_starts_no_gcloud(self):
         work = self.dotenv_tree("CLOUDSDK_PYTHON=/usr/bin/python3\nPYTHONPATH=src\nLD_LIBRARY_PATH=/opt/lib\n")
