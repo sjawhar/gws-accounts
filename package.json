@@ -1,6 +1,6 @@
 {
   "name": "gws-accounts",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Named accounts and least-privilege credential tiers for gws, plus the google-workspace skill",
   "license": "MIT OR Apache-2.0",

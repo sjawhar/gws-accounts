@@ -34,10 +34,13 @@ GWS_ACCOUNT=personal GWS_TIER=send gws gmail +send --to a@example.com --subject 
 - A tier's description may say that releasing its credential needs a human: a hardware-key touch, a biometric prompt. Tell the human which account and tier you are about to use before the call, run such calls one at a time, and front-load them before any long unattended work.
 - An account without tiers runs on the login `gws auth login` stored in its directory. `GWS_TIER` on it is an error. Until that login exists, every call on it except `gws auth` fails with `holds no stored login`; the login is `GWS_ACCOUNT=<account> gws auth login`, which needs the user to consent in a browser (gws auth, below).
 - Never set a `GWS_*_OAUTH` variable yourself. The wrapper runs the tier's command, which injects it, and, except for `gws auth`, refuses a call on an account that carries one for a tier or account it did not select.
+- A tier command may inject either an `authorized_user` JSON credential or a bare OAuth2 access token. A value whose first non-whitespace character is `{` is JSON; a bare token must be non-empty and have no whitespace anywhere. The wrapper gives gws a JSON credential through a temporary credentials file, or a bare token through `GOOGLE_WORKSPACE_CLI_TOKEN` in an empty private store with no credentials file, Application Default Credentials path, client ID, or client secret. Do not expose either value in a command line, file, or transcript.
 
 `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` pointing anywhere outside `~/.config/gws/<account>` runs gws on that store with no credential injected. That is how minting works (below). `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` set by the caller bypass account selection entirely.
 
-A `403 Caller does not have required permission to use project <project>` means gws sent `<project>` as the call's quota project and the account may not use that project. The credential is fine. gws takes the quota project from the first of: `GOOGLE_WORKSPACE_PROJECT_ID`; `installed.project_id` in `client_secret.json` in the store gws runs on (`~/.config/gws/<account>` for the read tier; `gws auth setup` and the console's client download both write it, so an OAuth client shared from someone else's project names their project); the `quota_project_id` of Application Default Credentials. Clear the source that names `<project>`: unset `GOOGLE_WORKSPACE_PROJECT_ID`, or set `installed.project_id` to `""` (keep the key: gws ignores a `client_secret.json` without it, and `gws auth login` then finds no OAuth client). If no later source supplies a quota project, Drive and Gmail calls run without one. If the retry names the Application Default Credentials' project, or that is the source, have the project's owner grant the account `roles/serviceusage.serviceUsageConsumer` on it rather than changing a setting other tools share.
+A `403 Caller does not have required permission to use project <project>` means gws sent `<project>` as the call's quota project and the account may not use that project. For an `authorized_user` JSON credential, gws takes the quota project from the first of: `GOOGLE_WORKSPACE_PROJECT_ID`; `installed.project_id` in `client_secret.json` in the store gws runs on (`~/.config/gws/<account>` for the JSON read tier; `gws auth setup` and the console's client download both write it, so an OAuth client shared from someone else's project names their project); the `quota_project_id` of Application Default Credentials. A bare-token tier runs in an empty private store and sets the credential variables empty, including `GOOGLE_APPLICATION_CREDENTIALS`, so only `GOOGLE_WORKSPACE_PROJECT_ID` can supply a quota project, and only from the caller's environment: a `.env` cannot, because the wrapper refuses a call whose `.env` sets a `GOOGLE_WORKSPACE_*` key (below). Clear the source that names `<project>`: unset `GOOGLE_WORKSPACE_PROJECT_ID`, or for the JSON read tier set `installed.project_id` to `""` (keep the key: gws ignores a `client_secret.json` without it, and `gws auth login` then finds no OAuth client). If no later source supplies a quota project, Drive and Gmail calls run without one. If a JSON retry names the Application Default Credentials' project, or that is the source, have the project's owner grant the account `roles/serviceusage.serviceUsageConsumer` on it rather than changing a setting other tools share.
+
+gws loads the nearest `.env` in its working directory or any parent directory, taking any variable the caller left unset. An ordinary project `.env` runs: the wrapper passes settings such as the proxy variables empty unless the caller set them, and a proxy the caller set under one spelling reaches gws under both. A setting with no safe empty value is refused with `gws-accounts: <file> sets <keys>`: trusted certificates, the proxy-off switch, the default-credentials path off a tier call, and any gws setting. A `gws auth` call starts `gcloud`, and also refuses what that child reads. `bin/gws` lists the keys. Those settings would re-trust, re-route or run code for a call that carries a credential. Tell the user which file and keys the error names; do not edit their `.env`, and do not set the keys yourself to get past it. Running gws from a directory outside that `.env` also works.
 
 ## stdout is pure JSON; never merge stderr into it
 
@@ -82,9 +85,9 @@ Formatting mistakes in documents people read are recurring and costly. Follow th
 
 To undo a login into the wrong store, delete that store's files. Do not revoke the grant at Google: Google may revoke every token issued under the same grant (RFC 7009 permits it), taking the stored credentials for that client and account with it.
 
-## Mint a credential for a tier
+## Mint a JSON credential for a tier
 
-A tier's credential is an `authorized_user` JSON (`client_id`, `client_secret`, `refresh_token`). Mint each tier as its own consent, with exactly that tier's scopes, on a Desktop-app OAuth client from a Google Cloud project the account's organization trusts (`gws auth setup` creates one with gcloud):
+A tier command may instead release a bare, short-lived OAuth2 access token; the wrapper passes it directly to gws and does not need a client ID, client secret, refresh token, or temporary credentials file. The steps below mint an `authorized_user` JSON credential (`client_id`, `client_secret`, `refresh_token`) when the tier command needs a renewable credential. Mint each tier as its own consent, with exactly that tier's scopes, on a Desktop-app OAuth client from a Google Cloud project the account's organization trusts (`gws auth setup` creates one with gcloud):
 
 ```bash
 store="$(mktemp -d)"
@@ -103,16 +106,22 @@ rm -rf "$store"
 
 ## Call an API gws lacks
 
-gws 0.22.5 has no Admin SDK Directory service (`gws admin:directory_v1 …` fails with `Unknown service 'admin'`), and other APIs may be missing too. Run the tier's command from `accounts.json` around a script that trades the credential's refresh token for an access token and calls the REST API. Never print the token or the credential.
+gws 0.22.5 has no Admin SDK Directory service (`gws admin:directory_v1 …` fails with `Unknown service 'admin'`), and other APIs may be missing too. Run the tier's command from `accounts.json` around a script that uses a bare access token directly, or trades an `authorized_user` JSON credential's refresh token for one, then calls the REST API. Never print the token or the credential.
 
 ```bash
 cmd=()
 while IFS= read -r arg; do cmd+=("$arg"); done < <(jq -r --arg a <account> --arg t <tier> '.[$a].tiers[$t].command[]' ~/.config/gws/accounts.json)
 "${cmd[@]}" python3 - <<'EOF'
 import json, os, urllib.parse, urllib.request
-cred = json.loads(os.environ["GWS_<ACCOUNT>_<TIER>_OAUTH"])
-form = {k: cred[k] for k in ("client_id", "client_secret", "refresh_token")} | {"grant_type": "refresh_token"}
-token = json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", urllib.parse.urlencode(form).encode()))["access_token"]
+value = os.environ["GWS_<ACCOUNT>_<TIER>_OAUTH"]
+if value.lstrip().startswith("{"):
+    cred = json.loads(value)
+    form = {k: cred[k] for k in ("client_id", "client_secret", "refresh_token")} | {"grant_type": "refresh_token"}
+    token = json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", urllib.parse.urlencode(form).encode()))["access_token"]
+else:
+    if not value or any(character.isspace() for character in value):
+        raise SystemExit("tier command returned an invalid credential")
+    token = value
 req = urllib.request.Request(
     "https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&maxResults=10&fields=users(primaryEmail,suspended)",
     headers={"Authorization": f"Bearer {token}"},

@@ -27,7 +27,7 @@ The agent asks which Google accounts to set up, installs gws, the wrapper and th
 Put the wrapper **before** the real gws on PATH. It finds the real gws by skipping every copy of itself on PATH, and every gws that hands the call straight back to it, as mise's gws shim does when mise has no gws version for the directory; with nothing left, it exits 127 instead of looping.
 
 ```bash
-git clone --branch v0.1.6 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
+git clone --branch v0.1.7 https://github.com/sjawhar/gws-accounts ~/.local/share/gws-accounts
 export PATH="$HOME/.local/share/gws-accounts/bin:$PATH"    # in your shell profile
 type -a gws                                                 # the wrapper must be listed first
 ```
@@ -39,7 +39,7 @@ Do not install the wrapper as a mise tool next to gws. mise's shims mode puts a 
 The skill installs per agent:
 
 - **Claude Code**: `/plugin marketplace add sjawhar/gws-accounts`, then `/plugin install gws-accounts@gws-accounts`.
-- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.6`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks both an `omp` field and the legacy `pi` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
+- **omp**: `omp plugin install github:sjawhar/gws-accounts#v0.1.7`. This installs the skill (`package.json` declares it under `omp.skills`; omp loads no part of a package that lacks both an `omp` field and the legacy `pi` field) but not the wrapper: omp does not add a plugin's `bin/` to PATH, so link the wrapper as described above.
 
 ## Accounts
 
@@ -81,7 +81,7 @@ A call selects an account the way gws selects a store: `GOOGLE_WORKSPACE_CLI_CON
 
 `GWS_TIER=<tier>` selects a tier; unset means `read`. An account with no `read` tier needs `GWS_TIER` on every call except `gws auth`, which takes none.
 
-A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to an `authorized_user` JSON credential: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). The command is not run through a shell, so `~` and `$HOME` do not expand in it.
+A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to either an `authorized_user` JSON credential or a bare OAuth2 access token: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). A value whose first non-whitespace character is `{` is JSON, so pretty-printed JSON with a leading newline works; every other value must be a single non-empty access token with no whitespace anywhere. The wrapper rejects any other value without printing it. The command is not run through a shell, so `~` and `$HOME` do not expand in it.
 
 Any secret runner works: [secretsd](https://github.com/sjawhar/forward)'s `secrets KEY --`, 1Password's `op run --env-file FILE --`, `sops exec-env`, or a script of your own. A plain file, for example:
 
@@ -91,9 +91,11 @@ Any secret runner works: [secretsd](https://github.com/sjawhar/forward)'s `secre
 
 **A tier protects exactly as much as the command that releases its credential.** A command that needs a human to approve each release (a hardware-key touch, a biometric prompt) keeps an agent from sending mail on its own. A command that reads a file only keeps an agent from doing it by accident.
 
-The wrapper writes the credential to a 0600 file in a private temporary directory, points gws at it, and removes it when gws exits. No `GWS_*_OAUTH` variable reaches gws's environment. The `read` tier runs against the account's directory, so gws keeps its token cache there; every other tier runs against a private store removed with the credential, because two tiers sharing an OAuth client would otherwise share cached tokens. Except for `gws auth`, the wrapper refuses a call on an account when the call already carries a `GWS_*_OAUTH` variable for an account or tier it did not select.
+For an `authorized_user` JSON credential, the wrapper writes a 0600 file in a private temporary directory, points gws at it, and removes it when gws exits. Its `read` tier runs against the account's directory, so gws keeps its token cache there; every other JSON tier runs against a private store removed with the credential, because two tiers sharing an OAuth client would otherwise share cached tokens. For a bare access token, the wrapper uses a separate empty private store and sets `GOOGLE_WORKSPACE_CLI_TOKEN`: gws receives no credentials file, Application Default Credentials path, client ID, or client secret. No `GWS_*_OAUTH` variable reaches gws's environment. Except for `gws auth`, the wrapper refuses a call on an account when the call already carries a `GWS_*_OAUTH` variable for an account or tier it did not select.
 
-The [skill](skills/google-workspace/SKILL.md) shows how to mint a credential for each tier, and how to call an API gws lacks (the Admin SDK Directory, for one) on a tier's credential.
+gws also loads the nearest `.env` file: the first one in its working directory or any parent directory, filling every variable the caller left unset. The wrapper, not the project, chooses what gws does, so before every launch it checks that file. Settings whose empty value turns them off, such as the proxy settings, are passed to gws empty unless you set them yourself, so an ordinary project `.env` runs unchanged and your own proxy still applies; a proxy setting you give under one spelling reaches gws under both, since gws reads whichever spelling is set first. Settings with no safe empty value are refused instead, naming the file and the keys but never their values: the certificates gws trusts, the switch that turns proxying off, the default-credentials path (except on a tier call, which sets it), and gws's own settings. A `gws auth` call also starts `gcloud`, which inherits the same file, so it additionally refuses what that child reads: its own settings, its interpreter and loader, and its TLS and temporary-file settings. `bin/gws` holds the one copy of each list, with the source line and measurement behind every entry.
+
+The [skill](skills/google-workspace/SKILL.md) shows how to mint an `authorized_user` JSON credential for a tier, work with a tier command that releases a bare token, and call an API gws lacks (the Admin SDK Directory, for one).
 
 ## Logging in with no display
 
@@ -105,7 +107,7 @@ The [skill](skills/google-workspace/SKILL.md) shows how to mint a credential for
 
 ## Design notes
 
-- **A wrapper, not a hook.** A hook can only allow or block a command. Tiers need a process around gws that fetches a credential and hands it over as a file, and a wrapper on PATH also covers callers no agent hook sees: scripts, MCP servers, `bash -c`.
+- **A wrapper, not a hook.** A hook can only allow or block a command. Tiers need a process around gws that fetches a credential and hands it to gws as either a file-backed JSON credential or an access-token environment variable, and a wrapper on PATH also covers callers no agent hook sees: scripts, MCP servers, `bash -c`.
 - **Not upstream.** gws removed its own multi-account support in v0.7.0 ([googleworkspace/cli#253](https://github.com/googleworkspace/cli/pull/253)).
 - **Fail loud.** A missing, ambiguous or mismatched credential is an error, never a fall-back to another account.
 

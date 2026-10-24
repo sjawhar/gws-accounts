@@ -1,184 +1,18 @@
 #!/usr/bin/env python3
 """Routing tests for bin/gws: which credential reaches real gws, and every error.
 
-Each test gets a scratch HOME holding ~/.config/gws/accounts.json and a stub
-directory first on PATH. The stub `gws` stands in for real gws and prints the
-environment it was given; `fake-secrets KEY -- cmd` injects KEY from
-STUB_VALUE_<KEY>, the way a secret runner does. The rest of PATH is /usr/bin
-and /bin only, so on macOS the wrapper runs under the system bash 3.2.
+The stubs and the Harness base class are in support.py.
 """
 
 import json
-import os
 import shutil
-import signal
-import stat
-import subprocess
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-WRAPPER = Path(__file__).resolve().parent.parent / "bin" / "gws"
-
-STUB_GWS = r"""echo "TOKEN=${GOOGLE_WORKSPACE_CLI_TOKEN:-}"
-echo "FILE=${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}"
-echo "ADC=${GOOGLE_APPLICATION_CREDENTIALS:-}"
-echo "DIR=${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}"
-echo "CLIENT_ID=${GOOGLE_WORKSPACE_CLI_CLIENT_ID:-}"
-printf 'ARG=%s\n' "$@"
-for v in $(compgen -v); do
-  case "$v" in
-    GWS_*_OAUTH|GWS_ACCOUNTS_REENTRY) if [ -n "${!v:-}" ]; then echo "LEAKED=$v"; fi ;;
-  esac
-done
-if [ -n "${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}" ]; then
-  echo "MODE=$(PYTHON -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE")"
-  cat "$GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"
-  echo
-fi
-exit "${STUB_EXIT:-0}"
-""".replace("PYTHON", sys.executable)
-
-FAKE_SECRETS = r"""key="$1"; shift
-[ "$1" = "--" ] && shift
-echo "FETCHED=$key" >&2
-value_var="STUB_VALUE_$key"
-if [ -z "${!value_var:-}" ]; then echo "fake-secrets: no value for $key" >&2; exit 1; fi
-export "$key=${!value_var}"
-exec "$@"
-"""
-
-# What mise's shim does when mise has no gws version for the directory (a relocated HOME or
-# XDG_CONFIG_HOME hides mise's global config): exec the first gws on PATH outside its own
-# directory, which is this wrapper when it is installed ahead of mise's shims.
-HAND_BACK = r"""own="${BASH_SOURCE[0]%/*}"
-IFS=':'
-for d in $PATH; do
-    [[ "$d" -ef "$own" ]] && continue
-    [[ -x "$d/gws" ]] && exec "$d/gws" "$@"
-done
-echo "hand-back: no gws on PATH" >&2
-exit 127"""
+from support import Harness, FAKE_ENV, STUB_GWS, WRAPPER, credential, fields, write_stub
 
 
-def secrets_cmd(key: str) -> list[str]:
-    return ["fake-secrets", key, "--"]
-
-
-ACCOUNTS = {
-    "personal": {
-        "description": "Personal Gmail",
-        "tiers": {
-            "read": {"command": secrets_cmd("GWS_PERSONAL_READ_OAUTH"), "description": "Drive, Docs, gmail.readonly"},
-            "send": {"command": secrets_cmd("GWS_PERSONAL_SEND_OAUTH"), "description": "gmail.send only"},
-        },
-    },
-    "work@example.com": {
-        "description": "Work",
-        "tiers": {"read": {"command": secrets_cmd("GWS_WORK_EXAMPLE_COM_READ_OAUTH")}},
-    },
-    "sendonly": {"tiers": {"send": {"command": secrets_cmd("GWS_SENDONLY_SEND_OAUTH")}}},
-    "plain@example.com": {"description": "An account gws auth login manages"},
-}
-
-
-def credential(tag: str) -> str:
-    return json.dumps(
-        {"type": "authorized_user", "id": tag, "client_id": f"{tag}-client-id", "client_secret": f"{tag}-client-secret"}
-    )
-
-
-def write_stub(directory: Path, name: str, body: str) -> Path:
-    path = directory / name
-    path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return path
-
-
-def fields(stdout: str) -> dict[str, str]:
-    out = {}
-    for line in stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep and key.isupper() and key not in out:
-            out[key] = value
-    return out
-
-
-class Routing(unittest.TestCase):
-    def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
-        self.home = root / "home"
-        self.gws_root = self.home / ".config" / "gws"
-        self.gws_root.mkdir(parents=True)
-        self.stub_dir = root / "stubs"
-        self.stub_dir.mkdir()
-        write_stub(self.stub_dir, "gws", STUB_GWS)
-        write_stub(self.stub_dir, "fake-secrets", FAKE_SECRETS)
-        # jq joins the stubs from a system location, so PATH stays minimal
-        # whether the host keeps jq in /usr/bin (Linux, macOS 15) or Homebrew.
-        jq = shutil.which("jq", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
-        self.assertIsNotNone(jq, "the test host needs jq")
-        (self.stub_dir / "jq").symlink_to(jq)
-        self.write_accounts(ACCOUNTS)
-        self.env = {"PATH": f"{self.stub_dir}:/usr/bin:/bin", "HOME": str(self.home)}
-
-    def write_accounts(self, accounts) -> None:
-        text = accounts if isinstance(accounts, str) else json.dumps(accounts)
-        (self.gws_root / "accounts.json").write_text(text, encoding="utf-8")
-
-    def run_gws(self, env=None, args=None) -> subprocess.CompletedProcess:
-        # A session of its own, so a wrapper that loops fails the test at the timeout and leaves
-        # no process behind, even where the loop runs in a child of the wrapper.
-        proc = subprocess.Popen(
-            [str(WRAPPER), *(args if args is not None else ["drive", "files", "list"])],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={**self.env, **(env or {})},
-            start_new_session=True,
-        )
-        try:
-            out, err = proc.communicate(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise
-        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
-
-    def hand_back_path(self, *after) -> str:
-        """PATH with a copy of this wrapper first, then a gws that hands every call back to it."""
-        copy_dir = self.stub_dir.parent / "copy"
-        copy_dir.mkdir()
-        shutil.copy(WRAPPER, copy_dir / "gws")
-        self.hand_back_dir = self.stub_dir.parent / "hand-back"
-        self.hand_back_dir.mkdir()
-        write_stub(self.hand_back_dir, "gws", HAND_BACK)
-        return ":".join(map(str, [copy_dir, self.hand_back_dir, *after]))
-
-    def assert_fails(self, result, *needles: str) -> None:
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        for needle in needles:
-            self.assertIn(needle, result.stderr)
-        self.assertNotIn("ARG=", result.stdout)
-
-    def assert_rejected_before_gws_or_secrets(self, result, exit_status: int, *needles: str) -> None:
-        self.assertEqual(result.returncode, exit_status, result.stderr)
-        self.assertIn("gws-accounts:", result.stderr)
-        for needle in needles:
-            self.assertIn(needle, result.stderr)
-        self.assertNotIn("ARG=", result.stdout)
-        self.assertNotIn("FETCHED=", result.stderr)
-
-    def store_login(self, account: str, stored: str = "credentials.enc") -> Path:
-        store = self.gws_root / account
-        store.mkdir(exist_ok=True)
-        path = store / stored
-        path.write_text("x", encoding="utf-8")
-        return path
-
+class Routing(Harness):
     # Selecting an account
 
     def test_no_account_lists_every_account_and_tier(self):
@@ -297,13 +131,46 @@ class Routing(unittest.TestCase):
                 })
                 self.assertEqual(result.returncode, exit_code, result.stderr)
                 got = fields(result.stdout)
+                self.assertEqual(got["TOKEN"], "")
                 self.assertIn('"id": "personal-read"', result.stdout)
                 self.assertEqual(got["MODE"], "600")
                 self.assertEqual(got["DIR"], str(self.gws_root / "personal"))
                 self.assertEqual(got["ADC"], got["FILE"])
                 self.assertEqual(got["CLIENT_ID"], "personal-read-client-id")
+                self.assertEqual(got["CLIENT_SECRET"], "personal-read-client-secret")
                 self.assertNotIn("LEAKED=", result.stdout)
                 self.assertFalse(Path(got["FILE"]).exists())
+
+    def test_json_credential_clears_an_inherited_access_token(self):
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read"),
+            "STUB_INHERITED_GOOGLE_WORKSPACE_CLI_TOKEN": "inherited-bearer-value",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = fields(result.stdout)
+        self.assertEqual(got["TOKEN"], "")
+        # Set empty, not unset, so a .env in gws's working directory cannot supply a token.
+        self.assertEqual(got["EMPTY"], "GOOGLE_WORKSPACE_CLI_TOKEN")
+        self.assertIn('"id": "personal-read"', result.stdout)
+
+    def test_json_credential_after_leading_whitespace_takes_the_json_route(self):
+        # A pretty-printed login a secret runner emits with a leading newline is still JSON:
+        # classification goes by the first non-whitespace character.
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "\n  \t" + json.dumps(
+                {"type": "authorized_user", "id": "pretty", "client_id": "pretty-client-id",
+                 "client_secret": "pretty-client-secret"}, indent=2),
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = fields(result.stdout)
+        self.assertEqual(got["TOKEN"], "")
+        self.assertEqual(got["MODE"], "600")
+        self.assertIn('"id": "pretty"', result.stdout)
+        self.assertEqual(got["CLIENT_ID"], "pretty-client-id")
+        self.assertEqual(got["CLIENT_SECRET"], "pretty-client-secret")
+        self.assertEqual(got["DIR"], str(self.gws_root / "personal"))
 
     def test_named_tier_runs_its_command_on_a_private_store(self):
         for exit_code in (0, 42):
@@ -324,104 +191,93 @@ class Routing(unittest.TestCase):
                 self.assertFalse(Path(got["FILE"]).exists())
                 self.assertNotIn("LEAKED=", result.stdout)
 
-    def test_unknown_tier_lists_the_account_tiers(self):
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "admin"})
-        self.assert_fails(result, "no tier 'admin'", "GWS_TIER=read", "GWS_TIER=send")
-        self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_account_without_a_read_tier_needs_a_tier(self):
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "sendonly"}), "no read tier", "GWS_TIER=send")
-        result = self.run_gws({"GWS_ACCOUNT": "sendonly", "GWS_TIER": "send",
-                               "STUB_VALUE_GWS_SENDONLY_SEND_OAUTH": credential("sendonly")})
+    def test_bare_access_token_reaches_gws_without_credential_variables(self):
+        env_log = self.stub_dir / "env-arguments"
+        token_scan_dir = self.stub_dir.parent / "token-scan"
+        token_scan_dir.mkdir()
+        write_stub(self.stub_dir, "env", FAKE_ENV)
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "TMPDIR": str(token_scan_dir),
+            "STUB_TOKEN_SCAN_DIR": str(token_scan_dir),
+            "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value",
+            "STUB_INHERITED_GOOGLE_APPLICATION_CREDENTIALS": "/inherited/adc.json",
+            "STUB_INHERITED_GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE": "/inherited/credentials.json",
+            "STUB_INHERITED_GOOGLE_WORKSPACE_CLI_CLIENT_ID": "inherited-client-id",
+            "STUB_INHERITED_GOOGLE_WORKSPACE_CLI_CLIENT_SECRET": "inherited-client-secret",
+            "STUB_INHERITED_GOOGLE_WORKSPACE_CLI_TOKEN": "inherited-bearer-value",
+            "STUB_ENV_ARG_LOG": str(env_log),
+        })
         self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_account_without_tiers_runs_on_its_own_store(self):
-        for stored in ("credentials.enc", "credentials.json"):
-            with self.subTest(stored=stored):
-                path = self.store_login("plain@example.com", stored)
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"})
-                path.unlink()
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(fields(result.stdout)["DIR"], str(self.gws_root / "plain@example.com"))
-                self.assertEqual(fields(result.stdout)["FILE"], "")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_account_without_tiers_and_no_stored_login_is_loud(self):
-        # Real gws falls back to Application Default Credentials on a store
-        # with no login, which would run the call as another identity.
-        adc = self.stub_dir / "adc.json"
-        adc.write_text(credential("adc"), encoding="utf-8")
-        store = self.gws_root / "plain@example.com"
-        for name, prepare in (("no store", lambda: None), ("empty store", lambda: store.mkdir(exist_ok=True))):
-            with self.subTest(name):
-                prepare()
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GOOGLE_APPLICATION_CREDENTIALS": str(adc)})
-                self.assert_fails(result, str(store), "no stored login", "GWS_ACCOUNT=plain@example.com gws auth login")
-
-    def test_tier_on_an_account_without_tiers_is_loud(self):
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GWS_TIER": "read"}), "has no tiers")
-
-    def test_credential_on_an_account_without_tiers_is_loud(self):
-        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_PLAIN_EXAMPLE_COM_READ_OAUTH"):
-            with self.subTest(key=key):
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: credential("other")})
-                self.assert_fails(result, "gws-accounts: ", key, "has no tiers", str(self.gws_root / "plain@example.com"))
-
-    def test_stored_login_in_a_tiered_account_is_loud(self):
-        for stored in ("credentials.enc", "credentials.json"):
-            with self.subTest(stored=stored):
-                path = self.store_login("personal", stored)
-                result = self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")})
-                path.unlink()
-                # A deleted credential cannot be restored, so the fix offered first keeps it.
-                self.assert_fails(result, stored, f"mv '{path}' '{path}.pre-gws-accounts'")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_credential_for_an_unselected_tier_or_account_is_loud(self):
-        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_SENDONLY_SEND_OAUTH", "GWS_OTHER_ADMIN_OAUTH"):
-            with self.subTest(key=key):
-                result = self.run_gws({"GWS_ACCOUNT": "personal", key: credential("other")})
-                self.assert_fails(result, key, "GWS_PERSONAL_READ_OAUTH")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_selected_credential_already_set_is_used_without_the_command(self):
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "send",
-                               "GWS_PERSONAL_SEND_OAUTH": credential("caller-injected")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"id": "caller-injected"', result.stdout)
-        self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_tier_command_that_never_runs_gws_is_loud(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["true"]}}}})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "exited 0 without running gws")
-
-    def test_tier_command_that_does_not_set_the_credential_is_loud(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["env"]}}}})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "ran gws without setting GWS_A_READ_OAUTH")
-
-    def test_failing_tier_command_keeps_its_exit_status(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["sh", "-c", "exit 7"]}}}})
-        result = self.run_gws({"GWS_ACCOUNT": "a"})
-        self.assertEqual(result.returncode, 7)
-        self.assertIn("failed (exit 7) before running gws", result.stderr)
-
-    def test_credential_without_client_id_is_loud(self):
-        bad = json.dumps({"type": "authorized_user", "client_secret": "s", "refresh_token": "r"})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": bad}), "client_id")
-
-    def test_credential_without_client_secret_is_rejected_before_gws_or_secrets(self):
-        bad = json.dumps({"type": "authorized_user", "client_id": "id", "refresh_token": "r"})
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_PERSONAL_READ_OAUTH": bad})
-        self.assert_rejected_before_gws_or_secrets(result, 1, "GWS_PERSONAL_READ_OAUTH is missing a non-empty client_secret")
-
-    def test_argument_with_spaces_survives_the_tier_command(self):
-        result = self.run_gws(
-            {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")},
-            args=["drive", "files", "list", "--params", '{"q": "name contains hello there"}'],
+        got = fields(result.stdout)
+        self.assertEqual(got["TOKEN"], "fixture-bearer-value")
+        self.assertEqual(got["FILE"], "")
+        self.assertEqual(got["ADC"], "")
+        self.assertEqual(got["CLIENT_ID"], "")
+        self.assertEqual(got["CLIENT_SECRET"], "")
+        # Set empty, not unset, so a .env in gws's working directory cannot supply any of them.
+        self.assertEqual(
+            got["EMPTY"].split(),
+            [
+                "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GOOGLE_WORKSPACE_CLI_CLIENT_ID",
+                "GOOGLE_WORKSPACE_CLI_CLIENT_SECRET",
+            ],
         )
+        store = Path(got["DIR"])
+        self.assertFalse(store.is_relative_to(self.gws_root))
+        # HOME stays the caller's: gws's npm launcher runs node through mise's shim, which
+        # needs the caller's mise config. The empty ADC variable keeps gws off ~/.config/gcloud.
+        self.assertEqual(got["HOME"], str(self.home))
+        self.assertFalse(store.exists())
+        self.assertNotIn("LEAKED=", result.stdout)
+        self.assertNotIn(
+            "GOOGLE_WORKSPACE_CLI_TOKEN=fixture-bearer-value",
+            env_log.read_text(encoding="utf-8"),
+        )
+
+    def test_bare_access_token_runs_the_selected_named_tier(self):
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "GWS_TIER": "send",
+            "STUB_VALUE_GWS_PERSONAL_SEND_OAUTH": "fixture-bearer-value",
+        }, args=["gmail", "+send", "--to", "a@example.com"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('ARG={"q": "name contains hello there"}\n', result.stdout)
-        self.assertEqual(result.stdout.count("ARG="), 5)
+        self.assertIn("FETCHED=GWS_PERSONAL_SEND_OAUTH", result.stderr)
+        self.assertNotIn("FETCHED=GWS_PERSONAL_READ_OAUTH", result.stderr)
+        got = fields(result.stdout)
+        self.assertEqual(got["TOKEN"], "fixture-bearer-value")
+        self.assertEqual(got["FILE"], "")
+        store = Path(got["DIR"])
+        self.assertFalse(store.is_relative_to(self.gws_root))
+        self.assertFalse(store.exists())
+
+    def test_bare_access_token_cannot_bypass_tier_selection(self):
+        value = "fixture-bearer-value"
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "GWS_PERSONAL_SEND_OAUTH": value,
+        })
+        self.assert_rejected_before_gws_or_secrets(
+            result, 1, "GWS_PERSONAL_SEND_OAUTH", "GWS_PERSONAL_READ_OAUTH"
+        )
+        self.assertNotIn(value, result.stdout)
+        self.assertNotIn(value, result.stderr)
+
+    def test_invalid_tier_values_are_refused_without_echoing_them(self):
+        for value in ("fixture bearer value", "fixture\nbearer\nvalue", "{not-json",
+                      " fixture-bearer-value", "fixture-bearer-value\n", "  \t ", "\n  {not-json"):
+            with self.subTest(value=value):
+                result = self.run_gws({
+                    "GWS_ACCOUNT": "personal",
+                    "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": value,
+                })
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("gws-accounts:", result.stderr)
+                self.assertNotIn("ARG=", result.stdout)
+                self.assertNotIn(value, result.stdout)
+                self.assertNotIn(value, result.stderr)
 
     # Calls that need no account
 
