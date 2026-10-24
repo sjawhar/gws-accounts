@@ -134,6 +134,7 @@ class Routing(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
+        self.root = root
         self.home = root / "home"
         self.gws_root = self.home / ".config" / "gws"
         self.gws_root.mkdir(parents=True)
@@ -153,15 +154,17 @@ class Routing(unittest.TestCase):
         text = accounts if isinstance(accounts, str) else json.dumps(accounts)
         (self.gws_root / "accounts.json").write_text(text, encoding="utf-8")
 
-    def run_gws(self, env=None, args=None) -> subprocess.CompletedProcess:
+    def run_gws(self, env=None, args=None, cwd=None) -> subprocess.CompletedProcess:
         # A session of its own, so a wrapper that loops fails the test at the timeout and leaves
-        # no process behind, even where the loop runs in a child of the wrapper.
+        # no process behind, even where the loop runs in a child of the wrapper. The scratch
+        # root is the default working directory, so no .env above the checkout reaches a test.
         proc = subprocess.Popen(
             [str(WRAPPER), *(args if args is not None else ["drive", "files", "list"])],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env={**self.env, **(env or {})},
+            cwd=cwd or self.root,
             start_new_session=True,
         )
         try:
@@ -202,6 +205,14 @@ class Routing(unittest.TestCase):
         path = store / stored
         path.write_text("x", encoding="utf-8")
         return path
+
+    def dotenv_tree(self, text: str) -> Path:
+        """A project directory holding .env with TEXT, and the subdirectory a call runs from."""
+        project = self.root / "project"
+        work = project / "sub" / "work"
+        work.mkdir(parents=True)
+        (project / ".env").write_text(text, encoding="utf-8")
+        return work
 
     # Selecting an account
 
@@ -468,6 +479,86 @@ class Routing(unittest.TestCase):
                 self.assertNotIn("ARG=", result.stdout)
                 self.assertNotIn(value, result.stdout)
                 self.assertNotIn(value, result.stderr)
+
+    # A .env that would redirect gws
+
+    def test_parent_dotenv_setting_a_proxy_is_refused_on_both_routes(self):
+        proxy = "http://dotenv-proxy.invalid:3128"
+        work = self.dotenv_tree(f"APP_ENV=dev\nHTTPS_PROXY={proxy}\n")
+        dotenv = self.root / "project" / ".env"
+        cases = {
+            "json via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read")},
+            "bare token via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
+            "json already set": {"GWS_PERSONAL_READ_OAUTH": credential("personal-read")},
+            "bare token already set": {"GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
+        }
+        for name, env in cases.items():
+            with self.subTest(name):
+                result = self.run_gws({"GWS_ACCOUNT": "personal", **env}, cwd=work)
+                self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(dotenv), "HTTPS_PROXY")
+                for value in (proxy, "fixture-bearer-value", "personal-read-client-secret"):
+                    self.assertNotIn(value, result.stderr)
+                    self.assertNotIn(value, result.stdout)
+
+    def test_dotenv_forms_dotenvy_loads_are_refused(self):
+        cases = {
+            "export prefix": ("export SSL_CERT_FILE=/srv/evil/ca.pem\n", "SSL_CERT_FILE"),
+            "spaces around the key": ("  https_proxy  =  http://x.invalid\n", "https_proxy"),
+            "tab after export": ("export\tALL_PROXY=socks5://x.invalid\n", "ALL_PROXY"),
+            "byte order mark": ("\ufeffHTTP_PROXY=http://x.invalid\n", "HTTP_PROXY"),
+            "unicode whitespace": ("\u00a0NO_PROXY\u00a0=*\n", "NO_PROXY"),
+            "empty value": ("SSL_CERT_DIR=\n", "SSL_CERT_DIR"),
+            "log filter": ("GOOGLE_WORKSPACE_CLI_LOG=gws=trace\n", "GOOGLE_WORKSPACE_CLI_LOG"),
+            "log file": ("GOOGLE_WORKSPACE_CLI_LOG_FILE=/srv/evil/logs\n", "GOOGLE_WORKSPACE_CLI_LOG_FILE"),
+            "no final newline": ("APP=1\nno_proxy=*", "no_proxy"),
+        }
+        for name, (text, key) in cases.items():
+            with self.subTest(name):
+                work = self.root / name.replace(" ", "-")
+                work.mkdir()
+                (work / ".env").write_text(text, encoding="utf-8")
+                result = self.run_gws({"GWS_ACCOUNT": "personal",
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
+                for value in ("/srv/evil/ca.pem", "x.invalid", "trace", "/srv/evil/logs"):
+                    self.assertNotIn(value, result.stderr)
+
+    def test_dotenv_key_already_in_the_environment_runs(self):
+        # dotenvy never overrides a variable that is already set, even to the empty string.
+        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        for value in ("http://explicit-proxy.example:3128", ""):
+            with self.subTest(value=value):
+                result = self.run_gws({"GWS_ACCOUNT": "personal", "HTTPS_PROXY": value,
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+
+    def test_ordinary_or_commented_dotenv_runs(self):
+        cases = {
+            "commented lines": "# HTTPS_PROXY=http://x.invalid\n   # export SSL_CERT_FILE=/srv/evil/ca.pem\n",
+            "other keys only": "APP_ENV=dev\nMY_HTTPS_PROXY=http://x.invalid\nHTTPS_PROXY_URL=http://x.invalid\n"
+                               "RUST_LOG=trace\n",
+            "dotted key": "HTTPS_PROXY.backup=http://x.invalid\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                work = self.root / name.replace(" ", "-")
+                work.mkdir()
+                (work / ".env").write_text(text, encoding="utf-8")
+                result = self.run_gws({"GWS_ACCOUNT": "personal",
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+
+    def test_only_the_nearest_dotenv_counts(self):
+        # dotenvy loads the first .env it finds walking up, so a nearer ordinary .env shadows
+        # a farther one that sets a proxy.
+        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        (work / ".env").write_text("APP_ENV=dev\n", encoding="utf-8")
+        result = self.run_gws({"GWS_ACCOUNT": "personal",
+                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
 
     def test_reentry_with_an_empty_tier_value_is_refused(self):
         result = self.run_gws({

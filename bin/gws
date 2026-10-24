@@ -13,6 +13,13 @@ readonly ACCOUNTS_ROOT="${HOME}/.config/gws"
 readonly ACCOUNTS_FILE="${ACCOUNTS_ROOT}/accounts.json"
 readonly DEFAULT_TIER=read
 
+# Keys a .env can set that change where gws sends requests (the proxy
+# variables reqwest reads), which certificates it trusts, or what it logs (gws
+# 0.22.5 logging.rs:32-35,46-74 reads GOOGLE_WORKSPACE_CLI_LOG and
+# GOOGLE_WORKSPACE_CLI_LOG_FILE). gws loads .env itself and cannot be told not
+# to, so a call is refused while the .env it would load sets one of them.
+readonly DOTENV_REDIRECT_KEYS="HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy SSL_CERT_FILE SSL_CERT_DIR GOOGLE_WORKSPACE_CLI_LOG GOOGLE_WORKSPACE_CLI_LOG_FILE"
+
 # jq definitions shared by every query of accounts.json. `token` turns an
 # account or tier name into its part of a credential variable name; `errors`
 # yields one message per problem in the file.
@@ -252,6 +259,46 @@ reject_unselected_credentials() {
     [[ -z "$FOREIGN" ]] || die "$FOREIGN is set, but this call selects account $ACCOUNT, tier $tier, whose credential is $key. Unset $FOREIGN: the wrapper runs the selected tier's command itself, and GWS_TIER chooses the tier."
 }
 
+dotenv_file() {
+    # DOTENV := the .env gws would load, or "". gws calls dotenvy::dotenv(),
+    # which takes the first regular file named .env in the working directory
+    # (the physical path, from getcwd), then in each parent up to /.
+    local dir candidate
+    DOTENV=""
+    dir="$(pwd -P)" || return 0
+    while :; do
+        candidate="${dir%/}/.env"
+        if [[ -f "$candidate" ]]; then
+            DOTENV="$candidate"
+            return 0
+        fi
+        [[ "$dir" != / ]] || return 0
+        dir="${dir%/*}"
+        [[ -n "$dir" ]] || dir=/
+    done
+}
+
+reject_redirecting_dotenv() {
+    # Refuse when the .env gws would load sets a DOTENV_REDIRECT_KEYS key that
+    # the environment does not already set: dotenvy never overrides a set
+    # variable, even an empty one. Keys are read the way dotenvy reads them:
+    # after a leading byte order mark, each line is optional whitespace, an
+    # optional `export` and whitespace, the key, optional whitespace, then =.
+    # A # line is a comment. Values are never read into the wrapper.
+    local keys
+    dotenv_file
+    [[ -n "$DOTENV" && -r "$DOTENV" ]] || return 0
+    keys="$(jq -Rsr --arg keys "$DOTENV_REDIRECT_KEYS" '
+        ($keys | split(" ")) as $redirect
+        | [ltrimstr("\ufeff") | split("\n")[]
+            | capture("^\\s*(?:export\\s+)?(?<key>[A-Za-z_][A-Za-z0-9_.]*)\\s*=")
+            | .key
+            | select(. as $key | $redirect | index([$key]))
+            | select(. as $key | $ENV | has($key) | not)]
+        | unique | join(", ")' <"$DOTENV")" || die "cannot read $DOTENV, the .env gws would load"
+    [[ -z "$keys" ]] || die "$DOTENV sets $keys. gws loads that file and would use it to choose its proxy, the certificates it trusts or what it logs, for a call that carries a credential. Remove those lines from $DOTENV, or run gws from a directory outside it."
+}
+
 stored_login() {
     # STORED := the first file in store $1 that gws reads a stored login from, or "".
     local name
@@ -273,6 +320,7 @@ run_materialized() {
     local real_gws="$1" key="$2" store="$3" value token="" creds_file="" client_id="" client_secret="" rc=0
     local json='^[[:space:]]*[{]'
     shift 3
+    reject_redirecting_dotenv
     value="${!key}"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf -- "$TMP_DIR"' EXIT
@@ -296,8 +344,8 @@ run_materialized() {
     # Credentials reach real gws as prefix assignments, which go into its
     # environment; arguments to env would show them in ps. Every source is
     # assigned on both routes, and one this route must not use is set empty,
-    # not unset: gws loads the nearest .env from its working directory for
-    # every variable left unset. An empty token is read as absent; an empty
+    # not unset: gws loads the nearest .env in its working directory or a parent
+    # for every variable left unset. An empty token is read as absent; an empty
     # credentials-file or ADC path names no file, so the quota-project lookup
     # skips it instead of falling back to the well-known ADC file. For JSON,
     # GOOGLE_APPLICATION_CREDENTIALS names the same file: without it gws bills
@@ -458,6 +506,9 @@ $(list_tiers "$ACCOUNT")"
         run_materialized "$real_gws" "$key" "$store" "$@"
     fi
     reject_unselected_credentials "$key" "$tier"
+    # Before the tier command releases a credential. run_materialized checks
+    # again before gws runs, in case the tier command changed the directory.
+    reject_redirecting_dotenv
     if [[ -n "${!key:-}" ]]; then
         run_materialized "$real_gws" "$key" "$store" "$@"
     fi
