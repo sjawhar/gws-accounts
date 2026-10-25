@@ -359,32 +359,63 @@ class Dotenv(Harness):
     def test_only_what_dotenvy_would_set_is_refused(self):
         # Each outcome below is what the compiled dotenvy 0.15.7 oracle did with that file,
         # in a scratch build from the crate source. dotenvy reads logical lines, not physical
-        # ones, and stops at the first line it cannot parse.
+        # ones, and stops at the first line, or the first value, it cannot parse, and at the
+        # first line that is not valid UTF-8. Fixtures are bytes, so a byte UTF-8 forbids can
+        # be one.
+        cert = b"SSL_CERT_FILE=/srv/evil/ca.pem\n"
         cases = {
             # oracle: result=ok, SSL_CERT_FILE=unset, APP_CONFIG=set
             "a quoted value that spans lines":
-                ('APP_CONFIG="ordinary\nSSL_CERT_FILE=/srv/evil/ca.pem\n"\n', "runs"),
+                (b'APP_CONFIG="ordinary\n' + cert + b'"\n', "runs"),
             # oracle: result=ok, SSL_CERT_FILE=unset, APP_CONFIG=set
             "a single-quoted value that spans lines":
-                ("APP_CONFIG='ordinary\nSSL_CERT_FILE=/srv/evil/ca.pem\n'\n", "runs"),
+                (b"APP_CONFIG='ordinary\n" + cert + b"'\n", "runs"),
             # oracle: result=error at 'this is not an assignment', SSL_CERT_FILE=unset
             "a key after a line dotenvy cannot parse":
-                ("this is not an assignment\nSSL_CERT_FILE=/srv/evil/ca.pem\n", "runs"),
+                (b"this is not an assignment\n" + cert, "runs"),
             # oracle: result=error, SSL_CERT_FILE=unset
             "an unclosed quote":
-                ('SSL_CERT_FILE="/srv/evil/ca.pem\n', "runs"),
+                (b'SSL_CERT_FILE="/srv/evil/ca.pem\n', "runs"),
+            # oracle: result=error LineParse("hello world", 6), SSL_CERT_FILE=unset
+            "a key after a value dotenvy cannot parse":
+                (b"APP_CONFIG=hello world\n" + cert, "runs"),
+            # oracle: result=error LineParse at the \q, SSL_CERT_FILE=unset
+            "a key after an escape dotenvy rejects":
+                (b'APP_CONFIG="a\\qb"\n' + cert, "runs"),
+            # oracle: result=error LineParse("${HOME", 5), SSL_CERT_FILE=unset
+            "a key after a substitution left open":
+                (b"APP_CONFIG=${HOME\n" + cert, "runs"),
+            # oracle: result=error LineParse at the closing quote, SSL_CERT_FILE=unset
+            "a key after a quote a substitution swallowed":
+                (b'APP_CONFIG="$HOME"\n' + cert, "runs"),
+            # oracle: result=error LineParse, SSL_CERT_FILE=unset: the key's own value fails
+            "a key whose own value dotenvy cannot parse":
+                (b"SSL_CERT_FILE=/srv/evil/ca.pem extra\n", "runs"),
+            # oracle: result=error InvalidData "stream did not contain valid UTF-8",
+            # SSL_CERT_FILE=unset
+            "a key after a byte that is not UTF-8":
+                (b"APP_CONFIG=\xff\n" + cert, "runs"),
+            # oracle: result=error InvalidData, SSL_CERT_FILE=unset: a UTF-16 surrogate
+            "a key after a surrogate encoded as UTF-8":
+                (b"APP_CONFIG=\xed\xa0\x80\n" + cert, "runs"),
+            # oracle: result=ok, SSL_CERT_FILE=set, APP_CONFIG=set, APP_PATH=set
+            "a key after values that parse":
+                (b'APP_CONFIG="${HOME}" #note\nAPP_PATH=a\\ b\n' + cert, "refused"),
             # oracle: result=ok, SSL_CERT_FILE=set, APP_CONFIG=set
             "a key after a quoted value that spans lines":
-                ('APP_CONFIG="ordinary\nvalue\n"\nSSL_CERT_FILE=/srv/evil/ca.pem\n', "refused"),
+                (b'APP_CONFIG="ordinary\nvalue\n"\n' + cert, "refused"),
             # oracle: result=error, SSL_CERT_FILE=set: dotenvy sets it before it stops
             "a key before a line dotenvy cannot parse":
-                ("SSL_CERT_FILE=/srv/evil/ca.pem\nthis is not an assignment\n", "refused"),
+                (cert + b"this is not an assignment\n", "refused"),
+            # oracle: result=error InvalidData, SSL_CERT_FILE=set: dotenvy sets it before it stops
+            "a key before a byte that is not UTF-8":
+                (cert + b"APP_CONFIG=\xff\n", "refused"),
         }
         for name, (text, expect) in cases.items():
             with self.subTest(name):
                 work = self.root / name.replace(" ", "-")
                 work.mkdir()
-                (work / ".env").write_text(text, encoding="utf-8")
+                (work / ".env").write_bytes(text)
                 result = self.run_gws({"GWS_ACCOUNT": "personal",
                                        "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
                 if expect == "refused":

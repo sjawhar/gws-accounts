@@ -136,9 +136,16 @@ def errors:
 #     when there is none, or when stat, which fs::metadata calls, fails for a
 #     candidate with any error but NotFound, which is ENOENT alone: dotenvy
 #     then stops with no file loaded at all.
+#   utf8 FILE: the lines of FILE before the first that is not valid UTF-8 as
+#     Rust's str::from_utf8 reads it (no overlong form, no surrogate, nothing
+#     past U+10FFFF). dotenvy reads a line at a time with read_line, which
+#     fails on such a line, and stops there (iter.rs:135,175 then :32-35).
 readonly PERL_HELPER='
 use strict;
 binmode STDOUT;
+my $char = qr/[\x00-\x7F]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}/;
+# Valid when its characters tile it: a byte no character starts is left over.
+sub utf8_valid { (my $rest = shift) =~ s/$char//g; return $rest eq "" }
 my $mode = shift @ARGV;
 if ($mode eq "find") {
     my $dir = shift @ARGV;
@@ -152,6 +159,12 @@ if ($mode eq "find") {
         last if $dir eq "/";
         $dir =~ s{/[^/]*\z}{};
         $dir = "/" if $dir eq "";
+    }
+} elsif ($mode eq "utf8") {
+    open(my $fh, "<:raw", $ARGV[0]) or die "gws-accounts: cannot read $ARGV[0]: $!\n";
+    while (defined(my $line = <$fh>)) {
+        last unless utf8_valid($line);
+        print $line;
     }
 } else {
     die "gws-accounts: no perl helper mode $mode\n";
@@ -446,13 +459,17 @@ dotenvy_keeps() {
 dotenv_assigned_keys() {
     # Print, one per line and in order, the keys dotenvy would set from file
     # $1. It reads logical lines, not physical ones: a quoted value runs on
-    # until its quote closes (iter.rs:84-179), and loading stops at the first
-    # line it cannot parse (iter.rs:32-35), so text inside a value and
-    # anything after a bad line set nothing. Values are parsed only as far as
-    # finding the key, and never printed. The one difference left from
-    # dotenvy: a value whose own parse fails (parse.rs:69) stops it, where
-    # this still reports the key, which refuses more rather than less.
-    jq -Rsr '
+    # until its quote closes (iter.rs:84-179). Loading stops at the first
+    # line that is not valid UTF-8 (perl's utf8 mode) and at the first line
+    # or value that does not parse (parse.rs:41-258, then iter.rs:32-35), so
+    # text inside a value and anything after a bad line set nothing. Values
+    # are parsed but never printed. One case stays open: a character right
+    # after a $NAME substitution ends the name unless char::is_alphanumeric
+    # holds for it, which jq cannot ask of a non-ASCII one, so both readings
+    # are followed and the value fails only when both fail. When one reading
+    # parses, the key is reported and the scan goes on, which refuses more
+    # rather than less.
+    "${PERL_COMMAND[@]}" utf8 "$1" | jq -Rsr '
         # The codepoints Rust'"'"'s char::is_whitespace matches.
         def ws: [9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,
                  8198,8199,8200,8201,8202,8232,8233,8239,8287,12288];
@@ -502,6 +519,45 @@ dotenv_assigned_keys() {
                     | select(($cs[.] | [.] | implode | test("^[A-Za-z0-9_.]$")) | not)) // $n) as $i
                 | {key: ($cs[0:$i] | implode), rest: $cs[$i:]}
             else null end;
+        # parse_value (parse.rs:123-258) over the codepoints of a value: true
+        # when it parses. Each state holds its strong and weak quotes, escape,
+        # expecting_end, substitution mode (0 none, 1 $NAME, 2 ${NAME}) and
+        # whether the name is still empty; done is a # that ends the value. A
+        # non-ASCII character in a $NAME may or may not be alphanumeric, so it
+        # leads to both states.
+        def alnum: (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122);
+        def vstep($c):
+            if .done then [.]
+            elif .x then (if $c == 32 or $c == 9 then [.] elif $c == 35 then [.done = true] else [] end)
+            elif .e then (if ([92, 39, 34, 36, 32, 110] | index($c)) != null then [.e = false] else [] end)
+            elif .s then (if $c == 39 then [.s = false] else [.] end)
+            elif .m == 2 then (if $c == 125 then [.m = 0 | .n = true] else [.n = false] end)
+            elif .m == 1 then
+                (if $c >= 128 or ($c | alnum) then [.n = false] else [] end)
+                + (if $c >= 128 or ($c | alnum | not) then
+                    (if $c == 123 and .n then [.m = 2]
+                     elif $c == 36 then [.n = true]
+                     else [.m = 0 | .n = true] end)
+                   else [] end)
+            elif $c == 36 then [.m = 1 | .n = true]
+            elif .w then (if $c == 34 then [.w = false] elif $c == 92 then [.e = true] else [.] end)
+            elif $c == 39 then [.s = true]
+            elif $c == 34 then [.w = true]
+            elif $c == 92 then [.e = true]
+            elif $c == 32 or $c == 9 then [.x = true]
+            else [.] end;
+        def value_ok($cs):
+            reduce $cs[] as $c ([{s: false, w: false, e: false, x: false, m: 0, n: true, done: false}];
+                [.[] | vstep($c)[]] | unique)
+            | any(.[]; .done or (.m != 2 and (.s | not) and (.w | not)));
+        # The key of an assignment whose value parses: parse_line (parse.rs:
+        # 41-74) skips whitespace after the =, and a value that is then empty
+        # or starts with # is empty.
+        def assigned($k; $rest):
+            if ($rest | length) == 0 or $rest[0] != 61 then null
+            else ($rest[1:] | lstrip) as $v
+                | if ($v | length) == 0 or $v[0] == 35 or value_ok($v) then $k else null end
+            end;
         # parse_line (parse.rs:41-74): the key of an assignment, "" for a
         # blank or comment line, and null when dotenvy stops here.
         def parse_line($cs0):
@@ -512,12 +568,8 @@ dotenv_assigned_keys() {
                 else ($k.rest | lstrip) as $rest
                     | if $k.key == "export" and (($rest | length) == 0 or $rest[0] != 61) then
                         take_key($rest) as $k2
-                        | if $k2 == null then null
-                        else ($k2.rest | lstrip) as $r2
-                            | if ($r2 | length) > 0 and $r2[0] == 61 then $k2.key else null end
-                        end
-                    elif ($rest | length) > 0 and $rest[0] == 61 then $k.key
-                    else null end
+                        | if $k2 == null then null else assigned($k2.key; $k2.rest | lstrip) end
+                    else assigned($k.key; $rest) end
                 end
             end;
         # remove_bom (iter.rs:58-66), then the physical lines, each keeping
@@ -547,7 +599,7 @@ dotenv_assigned_keys() {
         | [range(0; $lines | length) | parse_line($lines[.] | explode)] as $parsed
         | (first(range(0; $parsed | length) | select($parsed[.] == null)) // ($parsed | length)) as $stop
         | $parsed[0:$stop] | map(select(. != "")) | .[]
-    ' <"$1"
+    '
 }
 
 reject_redirecting_dotenv() {
@@ -557,7 +609,7 @@ reject_redirecting_dotenv() {
     # The variables a tier launch assigns are set by then, and so exempt.
     # Values are never read into the wrapper.
     local all_keys="$DOTENV_REFUSE_KEYS" all_prefixes="$DOTENV_REFUSE_PREFIXES"
-    local key prefix protected found=""
+    local key keys prefix protected found=""
     snapshot_exported
     if [[ "${1:-}" == auth ]]; then
         all_keys="$all_keys $DOTENV_AUTH_KEYS"
@@ -566,6 +618,9 @@ reject_redirecting_dotenv() {
     dotenv_file
     [[ -n "$DOTENV" && -r "$DOTENV" ]] || return 0
     require_jq
+    # Taken whole, not through a process substitution, so a parser that fails
+    # refuses the call instead of reporting no keys.
+    keys="$(dotenv_assigned_keys "$DOTENV")" || die "could not read $DOTENV, the .env gws would load"
     while IFS= read -r key; do
         [[ -n "$key" ]] || continue
         protected=""
@@ -579,7 +634,7 @@ reject_redirecting_dotenv() {
         dotenvy_keeps "$key" && continue
         case " $found " in *" $key,"* | *" $key "*) continue ;; esac
         found="${found:+$found, }$key"
-    done < <(dotenv_assigned_keys "$DOTENV")
+    done <<< "$keys"
     [[ -z "$found" ]] || die "$DOTENV sets $found. gws loads that file and would use it to choose where this call goes, what it trusts, or what it records. Remove those lines from $DOTENV, or run gws from a directory outside it."
 }
 
