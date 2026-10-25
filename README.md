@@ -11,7 +11,7 @@ GWS_ACCOUNT=work GWS_TIER=send gws gmail +send --to a@example.com …       # ru
 
 ## Requirements
 
-- Linux or macOS, with bash (3.2 or later), perl 5 (macOS and most Linux distributions ship it) and [jq](https://jqlang.org)
+- Linux or macOS, with bash (3.2 or later), perl 5 (macOS and most Linux distributions ship it) and [jq](https://jqlang.org) (1.6 or later)
 - gws itself: `npm install -g @googleworkspace/cli`
 
 ## Install

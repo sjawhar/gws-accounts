@@ -155,8 +155,11 @@ class Harness(unittest.TestCase):
         write_stub(self.stub_dir, "fake-secrets", FAKE_SECRETS)
         # jq joins the stubs from a system location, so PATH stays minimal
         # whether the host keeps jq in /usr/bin (Linux, macOS 15) or Homebrew.
-        jq = shutil.which("jq", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
+        # GWS_TEST_JQ names another jq to run the suite on instead, such as the
+        # jq 1.6 that Debian 12 and Ubuntu 22.04 ship, which CI downloads.
+        jq = os.environ.get("GWS_TEST_JQ") or shutil.which("jq", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
         self.assertIsNotNone(jq, "the test host needs jq")
+        self.assertTrue(os.access(jq, os.X_OK), f"{jq} is not an executable jq")
         (self.stub_dir / "jq").symlink_to(jq)
         self.write_accounts(ACCOUNTS)
         self.env = {"PATH": f"{self.stub_dir}:/usr/bin:/bin", "HOME": str(self.home)}

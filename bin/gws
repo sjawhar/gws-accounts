@@ -498,8 +498,8 @@ dotenv_assigned_keys() {
             | (first(range(0; $n) | . as $i | select((ws | index($c[$i])) == null)) // $n) as $start
             | $c[$start:];
         def rstrip: . as $c
-            | (last(range(0; $c | length) | . as $i | select((ws | index($c[$i])) == null)) // -1) as $end
-            | $c[0:$end + 1];
+            | (last(range(0; $c | length) | . as $i | select((ws | index($c[$i])) == null)) // -1) as $last_kept
+            | $c[0:$last_kept + 1];
         # eval_end_state (iter.rs:84-123) over one physical line.
         def eval_end($state; $cs):
             reduce range(0; $cs | length) as $i ({pos: 0, state: $state, done: false};
