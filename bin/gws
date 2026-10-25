@@ -140,6 +140,11 @@ def errors:
 #     Rust's str::from_utf8 reads it (no overlong form, no surrogate, nothing
 #     past U+10FFFF). dotenvy reads a line at a time with read_line, which
 #     fails on such a line, and stops there (iter.rs:135,175 then :32-35).
+#   environ: one per line, each name in its own environment that a .env key
+#     could spell, [A-Za-z_][A-Za-z0-9_.]* (parse.rs:76-94), whose value is
+#     valid UTF-8 in the same sense, which std::env::var needs to read it
+#     (iter.rs:34). The five names env drops above are never listed; none is
+#     a key the .env check protects or neutralises.
 readonly PERL_HELPER='
 use strict;
 binmode STDOUT;
@@ -165,6 +170,10 @@ if ($mode eq "find") {
     while (defined(my $line = <$fh>)) {
         last unless utf8_valid($line);
         print $line;
+    }
+} elsif ($mode eq "environ") {
+    for my $name (sort keys %ENV) {
+        print "$name\n" if $name =~ /\A[A-Za-z_][A-Za-z0-9_.]*\z/ && utf8_valid($ENV{$name});
     }
 } else {
     die "gws-accounts: no perl helper mode $mode\n";
@@ -194,6 +203,10 @@ is_wrapper() {
 # (every shim of one mise), so the call reaches the gws past them or fails,
 # instead of the two exec'ing each other forever.
 HANDED=""
+# 1 while the launch being built runs under util-linux script, which hands the
+# command to the caller's $SHELL first, a hop this wrapper cannot test.
+# macOS's script runs the command itself.
+VIA_SCRIPT=0
 
 handed_back() {
     local IFS=':'
@@ -429,31 +442,30 @@ dotenv_file() {
     [[ -z "$found" ]] || DOTENV="${found%x}"
 }
 
-utf8_valid() {
-    # dotenvy keeps an inherited value only when std::env::var reads it, which
-    # needs valid UTF-8 (iter.rs:34). jq replaces every invalid byte with
-    # U+FFFD, so a value that comes back unchanged is the valid one. The x
-    # keeps the value's own trailing newlines, which $( ) would strip.
-    local decoded
-    require_jq
-    decoded="$(printf '%sx' "$1" | jq -Rsr . 2>/dev/null)" || return 1
-    [[ "$decoded" == "${1}x" ]]
-}
-
 snapshot_exported() {
-    # EXPORTED := the names in the environment real gws will inherit, between
-    # spaces. Only an exported name counts: bash gives itself shell variables
-    # such as PS4, SHELLOPTS and TERM that gws never sees. Taken afresh each
-    # time, since a tier launch exports its six before the check runs.
-    EXPORTED=" $(compgen -e | tr '\n' ' ')"
+    # EXPORTED := the names real gws will inherit with a value std::env::var
+    # reads, between spaces. A child launched the way real_command launches
+    # gws, through /bin/sh, reads them, so the list is what gws receives: a
+    # shell variable bash gives itself, such as PS4, SHELLOPTS or TERM, is in
+    # it only when exported, and a name the shell drops is not in it. dash,
+    # Ubuntu's /bin/sh, drops a dotted name such as GOOGLE_WORKSPACE_.X, which
+    # bash keeps. Taken afresh each time, since a tier launch exports its six
+    # before the check runs.
+    local names
+    require_perl
+    names="$(/bin/sh -c 'exec "$@"' sh "${PERL_COMMAND[@]}" environ)" ||
+        die "could not read the environment gws would inherit"
+    EXPORTED=" ${names//$'\n'/ } "
 }
 
 dotenvy_keeps() {
     # True when dotenvy would leave the caller's value for $1 alone, so the
     # .env cannot supply that key. An empty value counts; invalid UTF-8 does
-    # not, because dotenvy replaces such a value from the file.
+    # not, because dotenvy replaces such a value from the file. A launch
+    # through script (VIA_SCRIPT) may pass the call through the caller's own
+    # shell first, which may drop a dotted name, so one does not count there.
     case "$EXPORTED" in *" $1 "*) ;; *) return 1 ;; esac
-    utf8_valid "${!1}"
+    (( ! VIA_SCRIPT )) || [[ "$1" != *.* ]]
 }
 
 dotenv_assigned_keys() {
@@ -753,6 +765,7 @@ run_auth_login_headless() {
     [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 0
     command -v forward >/dev/null 2>&1 || return 0
     command -v script >/dev/null 2>&1 || die "script is not on PATH; it is needed to run gws auth login through forward"
+    [[ "$(uname -s)" == Darwin ]] || VIA_SCRIPT=1
     real_command "$real_gws" auth
     local -a cmd=("${REAL_COMMAND[@]}" "$@")
     if [[ "$(uname -s)" == Darwin ]]; then

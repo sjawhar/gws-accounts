@@ -9,7 +9,7 @@ import os
 import subprocess
 import unittest
 
-from support import Harness, WRAPPER, credential, fields
+from support import Harness, WRAPPER, credential, fields, write_stub
 
 
 class Dotenv(Harness):
@@ -355,6 +355,62 @@ class Dotenv(Harness):
             result = self.run_gws({**env, "HTTPS_PROXY": "http://caller.example:3128"}, cwd=work)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("https_proxy=http://caller.example:3128", fields(result.stdout)["SET"])
+
+    def test_an_inherited_dotted_name_exempts_its_key_only_when_gws_receives_it(self):
+        # dotenvy accepts a dot in a key and keeps an inherited value for it, but gws receives
+        # what the launch's /bin/sh passes on: bash keeps a name that is not a shell
+        # identifier, dash drops it. bash's own compgen -e lists such a name on 3.2 and not on
+        # 5.2, so it cannot say which. Each case runs a copy of the wrapper whose launch shell
+        # is the one named, so both outcomes are tested on every host. The stub reports
+        # from the raw environment whether the caller's value arrived.
+        key = "GOOGLE_WORKSPACE_.PROBE"
+        write_stub(self.stub_dir, "gws",
+                   f'echo "SEEN=$(/usr/bin/env | grep -cxF "{key}=caller-value" || true)"')
+        work = self.dotenv_tree(f"{key}=project-value\n")
+        env = {"GWS_ACCOUNT": "personal", key: "caller-value",
+               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        for shell, passes_the_name in (("/bin/bash", True), ("/bin/dash", False)):
+            with self.subTest(shell=shell):
+                if not os.access(shell, os.X_OK):
+                    self.skipTest(f"{shell} is not on this host")
+                copy = self.root / f"launch-through-{os.path.basename(shell)}" / "gws"
+                copy.parent.mkdir()
+                copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", shell), encoding="utf-8")
+                copy.chmod(0o755)
+                result = self.run_gws(env, cwd=work, wrapper=copy)
+                if passes_the_name:
+                    # gws receives the caller's value, so dotenvy leaves it and the file sets nothing.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("SEEN=1", result.stdout)
+                else:
+                    # gws never receives it, so dotenvy sets the key from the file: refused.
+                    self.assert_rejected_before_gws_or_secrets(
+                        result, 1, os.path.realpath(self.root / "project" / ".env"), key)
+
+    def test_a_dotted_name_does_not_exempt_a_key_on_the_login_route_through_script(self):
+        # util-linux script hands the command to the caller's $SHELL, which may drop a name
+        # that is not a shell identifier, and the wrapper cannot test which. So on that route
+        # a dotted name never counts as reaching gws; an ordinary name still does. The copy
+        # launches through bash, which keeps the name, so only that rule can refuse it. macOS's
+        # script runs the command itself.
+        if os.uname().sysname == "Darwin":
+            self.skipTest("macOS's script does not go through the caller's shell")
+        write_stub(self.stub_dir, "forward", ":")
+        copy = self.root / "launch-through-bash" / "gws"
+        copy.parent.mkdir()
+        copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", "/bin/bash"), encoding="utf-8")
+        copy.chmod(0o755)
+        for key, expect in (("GOOGLE_WORKSPACE_.PROBE", "refused"), ("GOOGLE_WORKSPACE_PROBE", "runs")):
+            with self.subTest(key=key):
+                work = self.root / f"script-{key.lower()}"
+                work.mkdir()
+                (work / ".env").write_text(f"{key}=project-value\n", encoding="utf-8")
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: "caller-value"},
+                                      args=["auth", "login"], cwd=work, wrapper=copy)
+                if expect == "refused":
+                    self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_what_dotenvy_would_set_is_refused(self):
         # Each outcome below is what the compiled dotenvy 0.15.7 oracle did with that file,
