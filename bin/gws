@@ -130,7 +130,13 @@ def errors:
 # with a mode and its arguments. env drops the settings that would load other
 # code into perl (PERL5OPT, PERL5LIB, PERLLIB) or recode the bytes it reads
 # and prints (PERLIO, PERL_UNICODE), so every path and value stays the bytes
-# the system holds.
+# the system holds. PERL_BADLANG=0 stops the four-line warning perl prints
+# when the locale fails to set, which costs the helper's callers 31 stderr
+# lines a call where LC_CTYPE names a locale the host lacks: macOS forwards
+# LC_CTYPE=UTF-8 over ssh by default, and Linux hosts have no such locale.
+# The helper reads and writes bytes, so the locale changes nothing it does.
+# The assignment follows the -u flags: GNU env reads an option after an
+# assignment as the command to run.
 #   find DIR: dotenvy::dotenv()'s finder (find.rs:33-57), from DIR. Prints the
 #     first regular file named .env, then x, from DIR up to /. Prints nothing
 #     when there is none, or when stat, which fs::metadata calls, fails for a
@@ -187,7 +193,7 @@ if ($mode eq "find") {
     die "gws-accounts: no perl helper mode $mode\n";
 }
 '
-PERL_COMMAND=(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERLIO -u PERL_UNICODE perl -e "$PERL_HELPER" --)
+PERL_COMMAND=(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERLIO -u PERL_UNICODE PERL_BADLANG=0 perl -e "$PERL_HELPER" --)
 
 die() {
     echo "gws-accounts: $*" >&2
