@@ -482,6 +482,30 @@ class Dotenv(Harness):
                     self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
                 self.assertNotIn("/srv/evil", result.stdout + result.stderr)
 
+    def test_a_character_split_across_a_jq_read_block_is_read_whole(self):
+        # jq before 1.8.2, which Ubuntu 24.04 and macOS 15 ship, reads each line of raw input
+        # (-R) in blocks of at most 4095 bytes, and turns a character whose bytes fall in two
+        # blocks into U+FFFD (jqlang/jq#3421). Here that character is U+3000, whitespace to
+        # dotenvy, so dotenvy ends the first line at the # after it and sets the next two
+        # keys; read as U+FFFD, the " after the # would open a quote that swallows them.
+        # Oracle (compiled dotenvy 0.15.7), both files: SET APP,
+        # GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE, SSL_CERT_FILE, then LineParse at the last ".
+        rest = ('#"\nSSL_CERT_FILE=/srv/evil/ca.pem\n'
+                'GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE=evil.invalid\n"\n')
+        for split, pad in (("two bytes, then one", 4089), ("one byte, then two", 4090)):
+            with self.subTest(split):
+                text = ("APP=" + "a" * pad + "\u3000" + rest).encode()
+                self.assertEqual(text.index("\u3000".encode()), 4 + pad)
+                work = self.root / f"pad-{pad}"
+                work.mkdir()
+                (work / ".env").write_bytes(text)
+                result = self.run_gws({"GWS_ACCOUNT": "personal",
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                self.assert_rejected_before_gws_or_secrets(
+                    result, 1, os.path.realpath(work / ".env"),
+                    "SSL_CERT_FILE", "GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE")
+                self.assertNotIn("/srv/evil", result.stdout + result.stderr)
+
     def test_a_metadata_error_ends_the_search_where_dotenvy_ends_it(self):
         # dotenvy's finder stops on any metadata error but NotFound (find.rs:36-46), wherever
         # in the candidate's path the error arises. Each outcome is the compiled dotenvy 0.15.7

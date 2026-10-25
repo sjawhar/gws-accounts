@@ -136,10 +136,15 @@ def errors:
 #     when there is none, or when stat, which fs::metadata calls, fails for a
 #     candidate with any error but NotFound, which is ENOENT alone: dotenvy
 #     then stops with no file loaded at all.
-#   utf8 FILE: the lines of FILE before the first that is not valid UTF-8 as
-#     Rust's str::from_utf8 reads it (no overlong form, no surrogate, nothing
-#     past U+10FFFF). dotenvy reads a line at a time with read_line, which
-#     fails on such a line, and stops there (iter.rs:135,175 then :32-35).
+#   codepoints FILE: the text of FILE before the first line that is not valid
+#     UTF-8 as Rust's str::from_utf8 reads it (no overlong form, no surrogate,
+#     nothing past U+10FFFF), as a JSON array of its codepoints. dotenvy reads
+#     a line at a time with read_line, which fails on such a line, and stops
+#     there (iter.rs:135,175 then :32-35). The array is ASCII, so jq never
+#     decodes the text itself: jq before 1.8.2 reads each line of raw input
+#     (-R) in blocks of at most 4095 bytes and turns a character split across
+#     two of them into U+FFFD (jqlang/jq#3421), which would hide a whitespace
+#     character dotenvy ends a line at.
 #   environ: one per line, each name in its own environment that a .env key
 #     could spell, [A-Za-z_][A-Za-z0-9_.]* (parse.rs:76-94), whose value is
 #     valid UTF-8 in the same sense, which std::env::var needs to read it
@@ -165,12 +170,15 @@ if ($mode eq "find") {
         $dir =~ s{/[^/]*\z}{};
         $dir = "/" if $dir eq "";
     }
-} elsif ($mode eq "utf8") {
+} elsif ($mode eq "codepoints") {
     open(my $fh, "<:raw", $ARGV[0]) or die "gws-accounts: cannot read $ARGV[0]: $!\n";
+    my $text = "";
     while (defined(my $line = <$fh>)) {
         last unless utf8_valid($line);
-        print $line;
+        $text .= $line;
     }
+    utf8::decode($text) or die "gws-accounts: cannot decode $ARGV[0]\n";
+    print "[", join(",", unpack("W*", $text)), "]\n";
 } elsif ($mode eq "environ") {
     for my $name (sort keys %ENV) {
         print "$name\n" if $name =~ /\A[A-Za-z_][A-Za-z0-9_.]*\z/ && utf8_valid($ENV{$name});
@@ -472,16 +480,17 @@ dotenv_assigned_keys() {
     # Print, one per line and in order, the keys dotenvy would set from file
     # $1. It reads logical lines, not physical ones: a quoted value runs on
     # until its quote closes (iter.rs:84-179). Loading stops at the first
-    # line that is not valid UTF-8 (perl's utf8 mode) and at the first line
-    # or value that does not parse (parse.rs:41-258, then iter.rs:32-35), so
-    # text inside a value and anything after a bad line set nothing. Values
-    # are parsed but never printed. One case stays open: a character right
-    # after a $NAME substitution ends the name unless char::is_alphanumeric
-    # holds for it, which jq cannot ask of a non-ASCII one, so both readings
-    # are followed and the value fails only when both fail. When one reading
-    # parses, the key is reported and the scan goes on, which refuses more
-    # rather than less.
-    "${PERL_COMMAND[@]}" utf8 "$1" | jq -Rsr '
+    # line that is not valid UTF-8 (perl's codepoints mode, which hands jq
+    # the text as numbers) and at the first line or value that does not parse
+    # (parse.rs:41-258, then iter.rs:32-35), so text inside a value and
+    # anything after a bad line set nothing. Values are parsed but never
+    # printed. One case stays open: a character right after a $NAME
+    # substitution ends the name unless char::is_alphanumeric holds for it,
+    # which jq cannot ask of a non-ASCII one, so both readings are followed
+    # and the value fails only when both fail. When one reading parses, the
+    # key is reported and the scan goes on, which refuses more rather than
+    # less.
+    "${PERL_COMMAND[@]}" codepoints "$1" | jq -r '
         # The codepoints Rust'"'"'s char::is_whitespace matches.
         def ws: [9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,
                  8198,8199,8200,8201,8202,8232,8233,8239,8287,12288];
@@ -584,9 +593,9 @@ dotenv_assigned_keys() {
                     else assigned($k.key; $rest) end
                 end
             end;
-        # remove_bom (iter.rs:58-66), then the physical lines, each keeping
-        # the newline the state machine reads.
-        ltrimstr("\ufeff") as $text
+        # The codepoints back into text, then remove_bom (iter.rs:58-66), then
+        # the physical lines, each keeping the newline the state machine reads.
+        implode | ltrimstr("\ufeff") as $text
         | ($text | split("\n")) as $raw
         | ($raw | length) as $n
         | [range(0; $n) | if . == $n - 1 then $raw[.] else $raw[.] + "\n" end]
