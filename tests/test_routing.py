@@ -119,6 +119,15 @@ class Routing(Harness):
         result = self.run_gws({"PATH": str(self.stub_dir), "GWS_ACCOUNT": "personal"})
         self.assert_rejected_before_gws_or_secrets(result, 127, "jq is not on PATH")
 
+    def test_missing_perl_is_rejected_before_gws(self):
+        # The .env search needs perl's stat, which reads the errno bash's file tests hide.
+        for name in ("bash", "head", "tr"):
+            target = shutil.which(name, path="/usr/bin:/bin")
+            self.assertIsNotNone(target, f"the test host needs {name}")
+            (self.stub_dir / name).symlink_to(target)
+        result = self.run_gws({"PATH": str(self.stub_dir)}, args=["--version"])
+        self.assert_rejected_before_gws_or_secrets(result, 127, "perl is not on PATH")
+
     # Tiers
 
     def test_read_tier_runs_by_default_on_the_account_store(self):

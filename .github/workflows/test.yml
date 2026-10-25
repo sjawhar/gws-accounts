@@ -25,6 +25,7 @@ jobs:
           test_path=/usr/bin:/bin
           env PATH="$test_path" bash -c 'bash --version | head -n 1'
           env PATH="$test_path" bash -c 'command -v jq && jq --version && command -v script'
+          env PATH="$test_path" bash -c 'command -v perl && perl -v | head -n 2'
           if [[ "$RUNNER_OS" == macOS ]]; then
             env PATH="$test_path" bash -c 'bash --version | grep -q "^GNU bash, version 3\.2\.57"'
           fi

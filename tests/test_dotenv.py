@@ -359,21 +359,44 @@ class Dotenv(Harness):
                 self.assertNotIn("/srv/evil", result.stdout + result.stderr)
 
     def test_a_metadata_error_ends_the_search_where_dotenvy_ends_it(self):
-        # dotenvy's finder stops on any metadata error but NotFound (find.rs:36-46). The
-        # oracle loaded nothing for the loop (result=error) and the parent file for the
-        # dangling link and the directory (result=ok, SSL_CERT_FILE=set).
+        # dotenvy's finder stops on any metadata error but NotFound (find.rs:36-46), wherever
+        # in the candidate's path the error arises. Each outcome is the compiled dotenvy 0.15.7
+        # oracle's, run from the child directory under a parent .env that sets SSL_CERT_FILE.
         env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
-        for name, make in (("symlink loop", lambda p: p.symlink_to(".env")),
-                           ("dangling symlink", lambda p: p.symlink_to("missing-target")),
-                           ("directory", lambda p: p.mkdir())):
+
+        def locked(candidate):
+            (candidate.parent / "locked").mkdir(mode=0o000)
+            self.addCleanup((candidate.parent / "locked").chmod, 0o700)
+            candidate.symlink_to("locked/.env")
+
+        cases = (
+            # oracle: result=error FilesystemLoop (errno 40), SSL_CERT_FILE=unset
+            ("symlink loop", lambda p: p.symlink_to(".env"), "runs"),
+            # oracle: result=error FilesystemLoop (errno 40), SSL_CERT_FILE=unset
+            ("loop in a path component",
+             lambda p: ((p.parent / "loop").symlink_to("loop"), p.symlink_to("loop/env")), "runs"),
+            # oracle: result=error NotADirectory (errno 20), SSL_CERT_FILE=unset
+            ("component that is not a directory",
+             lambda p: ((p.parent / "ordinary-file").write_text("", encoding="utf-8"),
+                        p.symlink_to("ordinary-file/env")), "runs"),
+            # oracle: result=error PermissionDenied (errno 13), SSL_CERT_FILE=unset
+            ("permission denied", locked, "runs"),
+            # oracle: result=ok, SSL_CERT_FILE=set
+            ("dangling symlink", lambda p: p.symlink_to("missing-target"), "refused"),
+            # oracle: result=ok, SSL_CERT_FILE=set
+            ("directory", lambda p: p.mkdir(), "refused"),
+        )
+        for name, make, expect in cases:
             with self.subTest(name):
+                if name == "permission denied" and os.geteuid() == 0:
+                    self.skipTest("root searches a mode-000 directory, so nothing is denied")
                 parent = self.root / name.replace(" ", "-")
                 work = parent / "child"
                 work.mkdir(parents=True)
                 (parent / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
                 make(work / ".env")
                 result = self.run_gws(env, cwd=work)
-                if name == "symlink loop":
+                if expect == "runs":
                     # The nearest candidate errors, so dotenvy never reaches the parent file.
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
