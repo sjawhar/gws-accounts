@@ -288,6 +288,43 @@ class Dotenv(Harness):
                                    "DISPLAY": ":0"}, args=["auth", "status"], cwd=work)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    # One test per browser input, each naming its key here, so dropping any one of them from
+    # bin/gws fails its own test; the list-driven test below cannot see a key that is gone.
+
+    def assert_only_an_auth_call_refuses(self, key, value):
+        work = self.root / f"only-{key.lower()}"
+        work.mkdir()
+        (work / ".env").write_text(f"{key}={value}\n", encoding="utf-8")
+        self.store_login("plain@example.com")
+        result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "status"], cwd=work)
+        self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), f"sets {key}.")
+        self.assertNotIn(value, result.stderr)
+        with self.subTest("a call that starts no gcloud runs"):
+            result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["drive", "files", "list"], cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        with self.subTest("the caller's own value runs the call"):
+            result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: "caller-value"},
+                                  args=["auth", "status"], cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_display(self):
+        self.assert_only_an_auth_call_refuses("DISPLAY", ":99")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_wayland_display(self):
+        self.assert_only_an_auth_call_refuses("WAYLAND_DISPLAY", "wayland-99")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_mir_socket(self):
+        self.assert_only_an_auth_call_refuses("MIR_SOCKET", "/srv/evil/mir")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_gnome_desktop_session_id(self):
+        self.assert_only_an_auth_call_refuses("GNOME_DESKTOP_SESSION_ID", "this-is-deprecated")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_kde_full_session(self):
+        self.assert_only_an_auth_call_refuses("KDE_FULL_SESSION", "true")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_term(self):
+        self.assert_only_an_auth_call_refuses("TERM", "xterm-evil")
+
     def test_an_invalid_utf8_caller_value_does_not_exempt_a_key(self):
         # dotenvy keeps a caller value only when std::env::var reads it, and that fails on
         # invalid UTF-8 (iter.rs:34), so the file would supply the key after all. The byte
