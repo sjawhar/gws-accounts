@@ -9,26 +9,29 @@ import os
 import subprocess
 import unittest
 
-from support import Harness, WRAPPER, credential, fields
+from support import Harness, WRAPPER, credential, fields, write_stub
 
 
 class Dotenv(Harness):
     # A .env that would redirect gws
 
-    def test_parent_dotenv_proxy_is_neutralized_on_every_credential_route(self):
+    def test_a_proxy_dotenv_is_neutralized_on_every_route(self):
         # Emptying a proxy variable turns it off, so the call runs and gws cannot read the
         # .env's value: an ordinary project .env with a proxy setting is not refused.
         proxy = "http://dotenv-proxy.invalid:3128"
         work = self.dotenv_tree(f"APP_ENV=dev\nHTTPS_PROXY={proxy}\nNO_PROXY=localhost\n")
-        cases = {
-            "json via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read")},
-            "bare token via tier command": {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
-            "json already set": {"GWS_PERSONAL_READ_OAUTH": credential("personal-read")},
-            "bare token already set": {"GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"},
-        }
-        for name, env in cases.items():
+        tier_routes = [
+            ("json via tier command",
+             {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("personal-read")}, None),
+            ("bare token via tier command",
+             {"STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, None),
+            ("json already set", {"GWS_PERSONAL_READ_OAUTH": credential("personal-read")}, None),
+            ("bare token already set", {"GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, None),
+        ]
+        tier_routes = [(name, {"GWS_ACCOUNT": "personal", **env}, args) for name, env, args in tier_routes]
+        for name, env, args in tier_routes + list(self.non_tier_routes()):
             with self.subTest(name):
-                result = self.run_gws({"GWS_ACCOUNT": "personal", **env}, cwd=work)
+                result = self.run_gws(env, args=args, cwd=work)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 neutral = fields(result.stdout)["NEUTRAL"].split()
                 self.assertIn("HTTPS_PROXY", neutral)
@@ -85,14 +88,21 @@ class Dotenv(Harness):
                     self.assertNotIn(value, result.stderr)
 
     def test_dotenv_key_already_in_the_environment_runs(self):
-        # dotenvy never overrides a variable that is already set, even to the empty string.
-        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
-        for value in ("http://explicit-proxy.example:3128", ""):
+        # dotenvy sets a key only when std::env::var fails for it (iter.rs:34), so a caller
+        # value, empty or not, keeps the file from supplying a refused key. Without one, the
+        # same file is refused.
+        work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
+        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        for value in ("/caller/ca.pem", ""):
             with self.subTest(value=value):
-                result = self.run_gws({"GWS_ACCOUNT": "personal", "HTTPS_PROXY": value,
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                result = self.run_gws({**env, "SSL_CERT_FILE": value}, cwd=work)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+        with self.subTest(value="absent"):
+            result = self.run_gws(env, cwd=work)
+            self.assert_rejected_before_gws_or_secrets(
+                result, 1, os.path.realpath(self.root / "project" / ".env"), "SSL_CERT_FILE")
+            self.assertNotIn("/srv/evil", result.stderr)
 
     def test_ordinary_or_commented_dotenv_runs(self):
         cases = {
@@ -112,9 +122,10 @@ class Dotenv(Harness):
                 self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
 
     def test_only_the_nearest_dotenv_counts(self):
-        # dotenvy loads the first .env it finds walking up, so a nearer ordinary .env shadows
-        # a farther one that sets a proxy.
-        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        # dotenvy loads the first .env it finds walking up (find.rs:33-57), so a nearer
+        # ordinary file shadows a farther one. The farther one sets a refused key, so this
+        # fails if the search ever reaches it.
+        work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
         (work / ".env").write_text("APP_ENV=dev\n", encoding="utf-8")
         result = self.run_gws({"GWS_ACCOUNT": "personal",
                                "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
@@ -212,15 +223,6 @@ class Dotenv(Harness):
                 self.assertNotIn("/srv/evil", result.stderr)
                 self.assertNotIn("caller-bearer-value", result.stderr)
 
-    def test_every_route_to_gws_neutralizes_a_proxy_dotenv(self):
-        work = self.dotenv_tree("APP_ENV=dev\nHTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
-        for name, env, args in self.non_tier_routes():
-            with self.subTest(name):
-                result = self.run_gws(env, args=args, cwd=work)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("HTTPS_PROXY", fields(result.stdout)["NEUTRAL"].split())
-                self.assertNotIn("dotenv-proxy.invalid", result.stdout)
-
     def test_every_route_to_gws_runs_under_an_ordinary_dotenv(self):
         # No PYTHONPATH here: an auth call refuses it, which its own test covers.
         work = self.dotenv_tree("APP_ENV=dev\nDATABASE_URL=postgres://localhost/app\n")
@@ -266,6 +268,289 @@ class Dotenv(Harness):
                     result = self.run_gws({"GWS_ACCOUNT": account}, args=["auth", "status"], cwd=work)
                     self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                     self.assertNotIn("/srv/evil", result.stderr)
+
+    def test_auth_call_is_refused_under_a_dotenv_naming_a_browser(self):
+        # gcloud's login flow hands BROWSER to Python's webbrowser, which runs a value
+        # holding %s as a command line, so a project .env could choose the program. Named
+        # here rather than left to the list-driven test, which cannot see a missing key.
+        work = self.root / "browser"
+        work.mkdir()
+        payload = work / "browser-payload"
+        (work / ".env").write_text(f'BROWSER="{payload} %s"\nDISPLAY=:99\n', encoding="utf-8")
+        for args in (["auth", "status"], ["auth", "login"]):
+            with self.subTest(args[1]):
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=args, cwd=work)
+                self.assert_rejected_before_gws_or_secrets(
+                    result, 1, os.path.realpath(work / ".env"), "BROWSER")
+                self.assertNotIn(str(payload), result.stderr)
+        with self.subTest("the caller's own browser still runs the call"):
+            result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", "BROWSER": "/usr/bin/true",
+                                   "DISPLAY": ":0"}, args=["auth", "status"], cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    # One test per browser input, each naming its key here, so dropping any one of them from
+    # bin/gws fails its own test; the list-driven test below cannot see a key that is gone.
+
+    def assert_only_an_auth_call_refuses(self, key, value):
+        work = self.root / f"only-{key.lower()}"
+        work.mkdir()
+        (work / ".env").write_text(f"{key}={value}\n", encoding="utf-8")
+        self.store_login("plain@example.com")
+        result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "status"], cwd=work)
+        self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), f"sets {key}.")
+        self.assertNotIn(value, result.stderr)
+        with self.subTest("a call that starts no gcloud runs"):
+            result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["drive", "files", "list"], cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        with self.subTest("the caller's own value runs the call"):
+            result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: "caller-value"},
+                                  args=["auth", "status"], cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_display(self):
+        self.assert_only_an_auth_call_refuses("DISPLAY", ":99")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_wayland_display(self):
+        self.assert_only_an_auth_call_refuses("WAYLAND_DISPLAY", "wayland-99")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_mir_socket(self):
+        self.assert_only_an_auth_call_refuses("MIR_SOCKET", "/srv/evil/mir")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_gnome_desktop_session_id(self):
+        self.assert_only_an_auth_call_refuses("GNOME_DESKTOP_SESSION_ID", "this-is-deprecated")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_kde_full_session(self):
+        self.assert_only_an_auth_call_refuses("KDE_FULL_SESSION", "true")
+
+    def test_auth_call_is_refused_under_a_dotenv_setting_term(self):
+        self.assert_only_an_auth_call_refuses("TERM", "xterm-evil")
+
+    def test_an_invalid_utf8_caller_value_does_not_exempt_a_key(self):
+        # dotenvy keeps a caller value only when std::env::var reads it, and that fails on
+        # invalid UTF-8 (iter.rs:34), so the file would supply the key after all. The byte
+        # goes through the environment mapping, never through a command line.
+        work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
+        dotenv = os.path.realpath(self.root / "project" / ".env")
+        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        with self.subTest("invalid UTF-8"):
+            # "\udcff" is how os.fsencode writes the single byte 0xff.
+            result = self.run_gws({**env, "SSL_CERT_FILE": "\udcff"}, cwd=work)
+            self.assert_rejected_before_gws_or_secrets(result, 1, dotenv, "SSL_CERT_FILE")
+        with self.subTest("valid UTF-8 control"):
+            result = self.run_gws({**env, "SSL_CERT_FILE": "\u00ff"}, cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_invalid_utf8_proxy_is_not_treated_as_the_callers(self):
+        # Same rule for the proxy pairs: a value dotenvy would replace is not the caller's,
+        # so the launch empties the pair instead of copying it into the twin.
+        work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
+        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        with self.subTest("invalid UTF-8"):
+            result = self.run_gws({**env, "HTTPS_PROXY": "\udcff"}, cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            neutral = fields(result.stdout)["NEUTRAL"].split()
+            self.assertIn("HTTPS_PROXY", neutral)
+            self.assertIn("https_proxy", neutral)
+        with self.subTest("valid UTF-8 control"):
+            result = self.run_gws({**env, "HTTPS_PROXY": "http://caller.example:3128"}, cwd=work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("https_proxy=http://caller.example:3128", fields(result.stdout)["SET"])
+
+    def test_an_inherited_dotted_name_exempts_its_key_only_when_gws_receives_it(self):
+        # dotenvy accepts a dot in a key and keeps an inherited value for it, but gws receives
+        # what the launch's /bin/sh passes on: bash keeps a name that is not a shell
+        # identifier, dash drops it. bash's own compgen -e lists such a name on 3.2 and not on
+        # 5.2, so it cannot say which. Each case runs a copy of the wrapper whose launch shell
+        # is the one named, so both outcomes are tested on every host. The stub reports
+        # from the raw environment whether the caller's value arrived.
+        key = "GOOGLE_WORKSPACE_.PROBE"
+        write_stub(self.stub_dir, "gws",
+                   f'echo "SEEN=$(/usr/bin/env | grep -cxF "{key}=caller-value" || true)"')
+        work = self.dotenv_tree(f"{key}=project-value\n")
+        env = {"GWS_ACCOUNT": "personal", key: "caller-value",
+               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        for shell, passes_the_name in (("/bin/bash", True), ("/bin/dash", False)):
+            with self.subTest(shell=shell):
+                if not os.access(shell, os.X_OK):
+                    self.skipTest(f"{shell} is not on this host")
+                copy = self.root / f"launch-through-{os.path.basename(shell)}" / "gws"
+                copy.parent.mkdir()
+                copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", shell), encoding="utf-8")
+                copy.chmod(0o755)
+                result = self.run_gws(env, cwd=work, wrapper=copy)
+                if passes_the_name:
+                    # gws receives the caller's value, so dotenvy leaves it and the file sets nothing.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("SEEN=1", result.stdout)
+                else:
+                    # gws never receives it, so dotenvy sets the key from the file: refused.
+                    self.assert_rejected_before_gws_or_secrets(
+                        result, 1, os.path.realpath(self.root / "project" / ".env"), key)
+
+    def test_a_dotted_name_does_not_exempt_a_key_on_the_login_route_through_script(self):
+        # util-linux script hands the command to the caller's $SHELL, which may drop a name
+        # that is not a shell identifier, and the wrapper cannot test which. So on that route
+        # a dotted name never counts as reaching gws; an ordinary name still does. The copy
+        # launches through bash, which keeps the name, so only that rule can refuse it. macOS's
+        # script runs the command itself.
+        if os.uname().sysname == "Darwin":
+            self.skipTest("macOS's script does not go through the caller's shell")
+        write_stub(self.stub_dir, "forward", ":")
+        copy = self.root / "launch-through-bash" / "gws"
+        copy.parent.mkdir()
+        copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", "/bin/bash"), encoding="utf-8")
+        copy.chmod(0o755)
+        for key, expect in (("GOOGLE_WORKSPACE_.PROBE", "refused"), ("GOOGLE_WORKSPACE_PROBE", "runs")):
+            with self.subTest(key=key):
+                work = self.root / f"script-{key.lower()}"
+                work.mkdir()
+                (work / ".env").write_text(f"{key}=project-value\n", encoding="utf-8")
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: "caller-value"},
+                                      args=["auth", "login"], cwd=work, wrapper=copy)
+                if expect == "refused":
+                    self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_only_what_dotenvy_would_set_is_refused(self):
+        # Each outcome below is what the compiled dotenvy 0.15.7 oracle did with that file,
+        # in a scratch build from the crate source. dotenvy reads logical lines, not physical
+        # ones, and stops at the first line, or the first value, it cannot parse, and at the
+        # first line that is not valid UTF-8. Fixtures are bytes, so a byte UTF-8 forbids can
+        # be one.
+        cert = b"SSL_CERT_FILE=/srv/evil/ca.pem\n"
+        cases = {
+            # oracle: result=ok, SSL_CERT_FILE=unset, APP_CONFIG=set
+            "a quoted value that spans lines":
+                (b'APP_CONFIG="ordinary\n' + cert + b'"\n', "runs"),
+            # oracle: result=ok, SSL_CERT_FILE=unset, APP_CONFIG=set
+            "a single-quoted value that spans lines":
+                (b"APP_CONFIG='ordinary\n" + cert + b"'\n", "runs"),
+            # oracle: result=error at 'this is not an assignment', SSL_CERT_FILE=unset
+            "a key after a line dotenvy cannot parse":
+                (b"this is not an assignment\n" + cert, "runs"),
+            # oracle: result=error, SSL_CERT_FILE=unset
+            "an unclosed quote":
+                (b'SSL_CERT_FILE="/srv/evil/ca.pem\n', "runs"),
+            # oracle: result=error LineParse("hello world", 6), SSL_CERT_FILE=unset
+            "a key after a value dotenvy cannot parse":
+                (b"APP_CONFIG=hello world\n" + cert, "runs"),
+            # oracle: result=error LineParse at the \q, SSL_CERT_FILE=unset
+            "a key after an escape dotenvy rejects":
+                (b'APP_CONFIG="a\\qb"\n' + cert, "runs"),
+            # oracle: result=error LineParse("${HOME", 5), SSL_CERT_FILE=unset
+            "a key after a substitution left open":
+                (b"APP_CONFIG=${HOME\n" + cert, "runs"),
+            # oracle: result=error LineParse at the closing quote, SSL_CERT_FILE=unset
+            "a key after a quote a substitution swallowed":
+                (b'APP_CONFIG="$HOME"\n' + cert, "runs"),
+            # oracle: result=error LineParse, SSL_CERT_FILE=unset: the key's own value fails
+            "a key whose own value dotenvy cannot parse":
+                (b"SSL_CERT_FILE=/srv/evil/ca.pem extra\n", "runs"),
+            # oracle: result=error InvalidData "stream did not contain valid UTF-8",
+            # SSL_CERT_FILE=unset
+            "a key after a byte that is not UTF-8":
+                (b"APP_CONFIG=\xff\n" + cert, "runs"),
+            # oracle: result=error InvalidData, SSL_CERT_FILE=unset: a UTF-16 surrogate
+            "a key after a surrogate encoded as UTF-8":
+                (b"APP_CONFIG=\xed\xa0\x80\n" + cert, "runs"),
+            # oracle: result=ok, SSL_CERT_FILE=set, APP_CONFIG=set, APP_PATH=set
+            "a key after values that parse":
+                (b'APP_CONFIG="${HOME}" #note\nAPP_PATH=a\\ b\n' + cert, "refused"),
+            # oracle: result=ok, SSL_CERT_FILE=set, APP_CONFIG=set
+            "a key after a quoted value that spans lines":
+                (b'APP_CONFIG="ordinary\nvalue\n"\n' + cert, "refused"),
+            # oracle: result=error, SSL_CERT_FILE=set: dotenvy sets it before it stops
+            "a key before a line dotenvy cannot parse":
+                (cert + b"this is not an assignment\n", "refused"),
+            # oracle: result=error InvalidData, SSL_CERT_FILE=set: dotenvy sets it before it stops
+            "a key before a byte that is not UTF-8":
+                (cert + b"APP_CONFIG=\xff\n", "refused"),
+        }
+        for name, (text, expect) in cases.items():
+            with self.subTest(name):
+                work = self.root / name.replace(" ", "-")
+                work.mkdir()
+                (work / ".env").write_bytes(text)
+                result = self.run_gws({"GWS_ACCOUNT": "personal",
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                if expect == "refused":
+                    self.assert_rejected_before_gws_or_secrets(
+                        result, 1, os.path.realpath(work / ".env"), "SSL_CERT_FILE")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                self.assertNotIn("/srv/evil", result.stdout + result.stderr)
+
+    def test_a_character_split_across_a_jq_read_block_is_read_whole(self):
+        # jq before 1.8.2, which Ubuntu 24.04 and macOS 15 ship, reads each line of raw input
+        # (-R) in blocks of at most 4095 bytes, and turns a character whose bytes fall in two
+        # blocks into U+FFFD (jqlang/jq#3421). Here that character is U+3000, whitespace to
+        # dotenvy, so dotenvy ends the first line at the # after it and sets the next two
+        # keys; read as U+FFFD, the " after the # would open a quote that swallows them.
+        # Oracle (compiled dotenvy 0.15.7), both files: SET APP,
+        # GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE, SSL_CERT_FILE, then LineParse at the last ".
+        rest = ('#"\nSSL_CERT_FILE=/srv/evil/ca.pem\n'
+                'GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE=evil.invalid\n"\n')
+        for split, pad in (("two bytes, then one", 4089), ("one byte, then two", 4090)):
+            with self.subTest(split):
+                text = ("APP=" + "a" * pad + "\u3000" + rest).encode()
+                self.assertEqual(text.index("\u3000".encode()), 4 + pad)
+                work = self.root / f"pad-{pad}"
+                work.mkdir()
+                (work / ".env").write_bytes(text)
+                result = self.run_gws({"GWS_ACCOUNT": "personal",
+                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                self.assert_rejected_before_gws_or_secrets(
+                    result, 1, os.path.realpath(work / ".env"),
+                    "SSL_CERT_FILE", "GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE")
+                self.assertNotIn("/srv/evil", result.stdout + result.stderr)
+
+    def test_a_metadata_error_ends_the_search_where_dotenvy_ends_it(self):
+        # dotenvy's finder stops on any metadata error but NotFound (find.rs:36-46), wherever
+        # in the candidate's path the error arises. Each outcome is the compiled dotenvy 0.15.7
+        # oracle's, run from the child directory under a parent .env that sets SSL_CERT_FILE.
+        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+
+        def locked(candidate):
+            (candidate.parent / "locked").mkdir(mode=0o000)
+            self.addCleanup((candidate.parent / "locked").chmod, 0o700)
+            candidate.symlink_to("locked/.env")
+
+        cases = (
+            # oracle: result=error FilesystemLoop (errno 40), SSL_CERT_FILE=unset
+            ("symlink loop", lambda p: p.symlink_to(".env"), "runs"),
+            # oracle: result=error FilesystemLoop (errno 40), SSL_CERT_FILE=unset
+            ("loop in a path component",
+             lambda p: ((p.parent / "loop").symlink_to("loop"), p.symlink_to("loop/env")), "runs"),
+            # oracle: result=error NotADirectory (errno 20), SSL_CERT_FILE=unset
+            ("component that is not a directory",
+             lambda p: ((p.parent / "ordinary-file").write_text("", encoding="utf-8"),
+                        p.symlink_to("ordinary-file/env")), "runs"),
+            # oracle: result=error PermissionDenied (errno 13), SSL_CERT_FILE=unset
+            ("permission denied", locked, "runs"),
+            # oracle: result=ok, SSL_CERT_FILE=set
+            ("dangling symlink", lambda p: p.symlink_to("missing-target"), "refused"),
+            # oracle: result=ok, SSL_CERT_FILE=set
+            ("directory", lambda p: p.mkdir(), "refused"),
+        )
+        for name, make, expect in cases:
+            with self.subTest(name):
+                if name == "permission denied" and os.geteuid() == 0:
+                    self.skipTest("root searches a mode-000 directory, so nothing is denied")
+                parent = self.root / name.replace(" ", "-")
+                work = parent / "child"
+                work.mkdir(parents=True)
+                (parent / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
+                make(work / ".env")
+                result = self.run_gws(env, cwd=work)
+                if expect == "runs":
+                    # The nearest candidate errors, so dotenvy never reaches the parent file.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                else:
+                    self.assert_rejected_before_gws_or_secrets(
+                        result, 1, os.path.realpath(parent / ".env"), "SSL_CERT_FILE")
 
     def test_every_listed_key_is_handled_as_its_list_says(self):
         # Read the lists from the wrapper itself, so a key added there is tested here without a

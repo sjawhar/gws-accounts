@@ -119,6 +119,28 @@ class Routing(Harness):
         result = self.run_gws({"PATH": str(self.stub_dir), "GWS_ACCOUNT": "personal"})
         self.assert_rejected_before_gws_or_secrets(result, 127, "jq is not on PATH")
 
+    def test_missing_perl_is_rejected_before_gws(self):
+        # The .env search needs perl's stat, which reads the errno bash's file tests hide.
+        for name in ("bash", "head", "tr"):
+            target = shutil.which(name, path="/usr/bin:/bin")
+            self.assertIsNotNone(target, f"the test host needs {name}")
+            (self.stub_dir / name).symlink_to(target)
+        result = self.run_gws({"PATH": str(self.stub_dir)}, args=["--version"])
+        self.assert_rejected_before_gws_or_secrets(result, 127, "perl is not on PATH")
+
+    def test_a_locale_the_host_lacks_adds_no_perl_warning(self):
+        # macOS forwards LC_CTYPE=UTF-8 over ssh by default and most Linux hosts have no
+        # such locale, so perl warned four lines per helper run, 31 stderr lines a call.
+        # PERL_BADLANG=0 silences that; the helper reads and writes bytes either way.
+        work = self.dotenv_tree("APP_ENV=dev\n")
+        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value",
+               "LC_CTYPE": "gws-accounts-no-such.locale"}
+        result = self.run_gws(env, cwd=work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+        self.assertNotIn("Setting locale failed", result.stderr)
+        self.assertEqual([l for l in result.stderr.splitlines() if l.startswith("perl:")], [])
+
     # Tiers
 
     def test_read_tier_runs_by_default_on_the_account_store(self):

@@ -155,8 +155,11 @@ class Harness(unittest.TestCase):
         write_stub(self.stub_dir, "fake-secrets", FAKE_SECRETS)
         # jq joins the stubs from a system location, so PATH stays minimal
         # whether the host keeps jq in /usr/bin (Linux, macOS 15) or Homebrew.
-        jq = shutil.which("jq", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
+        # GWS_TEST_JQ names another jq to run the suite on instead, such as the
+        # jq 1.6 that Debian 12 and Ubuntu 22.04 ship, which CI downloads.
+        jq = os.environ.get("GWS_TEST_JQ") or shutil.which("jq", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
         self.assertIsNotNone(jq, "the test host needs jq")
+        self.assertTrue(os.access(jq, os.X_OK), f"{jq} is not an executable jq")
         (self.stub_dir / "jq").symlink_to(jq)
         self.write_accounts(ACCOUNTS)
         self.env = {"PATH": f"{self.stub_dir}:/usr/bin:/bin", "HOME": str(self.home)}
@@ -165,12 +168,12 @@ class Harness(unittest.TestCase):
         text = accounts if isinstance(accounts, str) else json.dumps(accounts)
         (self.gws_root / "accounts.json").write_text(text, encoding="utf-8")
 
-    def run_gws(self, env=None, args=None, cwd=None) -> subprocess.CompletedProcess:
+    def run_gws(self, env=None, args=None, cwd=None, wrapper=None) -> subprocess.CompletedProcess:
         # A session of its own, so a wrapper that loops fails the test at the timeout and leaves
         # no process behind, even where the loop runs in a child of the wrapper. The scratch
         # root is the default working directory, so no .env above the checkout reaches a test.
         proc = subprocess.Popen(
-            [str(WRAPPER), *(args if args is not None else ["drive", "files", "list"])],
+            [str(wrapper or WRAPPER), *(args if args is not None else ["drive", "files", "list"])],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

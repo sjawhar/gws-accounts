@@ -38,7 +38,8 @@ Do not ask anything you can check yourself: the operating system, the shell, ins
 
 ```bash
 bash --version | head -n 1      # 3.2 or later
-jq --version
+perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
+jq --version                    # 1.6 or later
 git --version
 curl --version | head -n 1
 ```

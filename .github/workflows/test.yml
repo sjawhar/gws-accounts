@@ -25,11 +25,22 @@ jobs:
           test_path=/usr/bin:/bin
           env PATH="$test_path" bash -c 'bash --version | head -n 1'
           env PATH="$test_path" bash -c 'command -v jq && jq --version && command -v script'
+          env PATH="$test_path" bash -c 'command -v perl && perl -v | head -n 2'
           if [[ "$RUNNER_OS" == macOS ]]; then
             env PATH="$test_path" bash -c 'bash --version | grep -q "^GNU bash, version 3\.2\.57"'
           fi
       - name: Routing tests
         run: python3 -m unittest discover -s tests -v
+      # Debian 12 and Ubuntu 22.04 ship jq 1.6, which rejects syntax later jq
+      # accepts, so the suite also runs on the jq 1.6 release binary.
+      - name: Routing tests on jq 1.6
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/jq-1.6" https://github.com/jqlang/jq/releases/download/jq-1.6/jq-linux64
+          echo "af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44  $RUNNER_TEMP/jq-1.6" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/jq-1.6"
+          "$RUNNER_TEMP/jq-1.6" --version | grep -qx 'jq-1.6'
+          GWS_TEST_JQ="$RUNNER_TEMP/jq-1.6" python3 -m unittest discover -s tests -v
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck -s bash -e SC2016 bin/gws
