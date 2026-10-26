@@ -117,6 +117,9 @@ ACCOUNTS = {
     "plain@example.com": {"description": "An account gws auth login manages"},
 }
 
+# A tier call whose secret runner releases a bare token.
+BARE_TOKEN_CALL = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+
 
 def credential(tag: str) -> str:
     return json.dumps(
@@ -213,6 +216,11 @@ class Harness(unittest.TestCase):
         self.assertNotIn("ARG=", result.stdout)
         self.assertNotIn("FETCHED=", result.stderr)
 
+    def assert_ran_on_the_bare_token(self, result) -> None:
+        """The call reached real gws with the bare token BARE_TOKEN_CALL releases."""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+
     def store_login(self, account: str, stored: str = "credentials.enc") -> Path:
         store = self.gws_root / account
         store.mkdir(exist_ok=True)
@@ -220,10 +228,22 @@ class Harness(unittest.TestCase):
         path.write_text("x", encoding="utf-8")
         return path
 
+    def dotenv_dir(self, name: str, content: "str | bytes") -> Path:
+        """A directory NAME under the scratch root holding .env with CONTENT, which a call runs from."""
+        work = self.root / name
+        work.mkdir()
+        if isinstance(content, bytes):
+            (work / ".env").write_bytes(content)
+        else:
+            (work / ".env").write_text(content, encoding="utf-8")
+        return work
+
     def dotenv_tree(self, text: str) -> Path:
         """A project directory holding .env with TEXT, and the subdirectory a call runs from."""
-        project = self.root / "project"
-        work = project / "sub" / "work"
+        work = self.dotenv_dir("project", text) / "sub" / "work"
         work.mkdir(parents=True)
-        (project / ".env").write_text(text, encoding="utf-8")
         return work
+
+    def tree_dotenv(self) -> str:
+        """The resolved path of the .env that dotenv_tree writes, as the wrapper names it."""
+        return os.path.realpath(self.root / "project" / ".env")
