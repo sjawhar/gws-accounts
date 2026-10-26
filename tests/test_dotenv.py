@@ -4,12 +4,11 @@
 The stubs and the Harness base class are in support.py.
 """
 
-import json
 import os
 import subprocess
 import unittest
 
-from support import Harness, WRAPPER, credential, fields, write_stub
+from support import BARE_TOKEN_CALL, Harness, WRAPPER, credential, fields, write_stub
 
 
 class Dotenv(Harness):
@@ -47,8 +46,7 @@ class Dotenv(Harness):
             for caller_name in (upper, lower):
                 with self.subTest(caller=caller_name):
                     value = "http://corp-proxy.example:3128"
-                    result = self.run_gws({"GWS_ACCOUNT": "personal", caller_name: value,
-                                           "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                    result = self.run_gws({**BARE_TOKEN_CALL, caller_name: value}, cwd=work)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     got = fields(result.stdout)["SET"].split()
                     self.assertIn(f"{upper}={value}", got)
@@ -57,9 +55,8 @@ class Dotenv(Harness):
 
     def test_a_proxy_pair_the_caller_set_both_names_of_is_left_alone(self):
         work = self.dotenv_tree("APP_ENV=dev\n")
-        result = self.run_gws({"GWS_ACCOUNT": "personal",
-                               "HTTPS_PROXY": "http://upper.example:3128", "https_proxy": "http://lower.example:3128",
-                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+        result = self.run_gws({**BARE_TOKEN_CALL, "HTTPS_PROXY": "http://upper.example:3128",
+                               "https_proxy": "http://lower.example:3128"}, cwd=work)
         self.assertEqual(result.returncode, 0, result.stderr)
         got = fields(result.stdout)["SET"].split()
         self.assertIn("HTTPS_PROXY=http://upper.example:3128", got)
@@ -78,11 +75,8 @@ class Dotenv(Harness):
         }
         for name, (text, key) in cases.items():
             with self.subTest(name):
-                work = self.root / name.replace(" ", "-")
-                work.mkdir()
-                (work / ".env").write_text(text, encoding="utf-8")
-                result = self.run_gws({"GWS_ACCOUNT": "personal",
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                work = self.dotenv_dir(name.replace(" ", "-"), text)
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
                 self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                 for value in ("/srv/evil/ca.pem", "x.invalid", "trace", "/srv/evil/logs"):
                     self.assertNotIn(value, result.stderr)
@@ -92,16 +86,13 @@ class Dotenv(Harness):
         # value, empty or not, keeps the file from supplying a refused key. Without one, the
         # same file is refused.
         work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
-        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
         for value in ("/caller/ca.pem", ""):
             with self.subTest(value=value):
-                result = self.run_gws({**env, "SSL_CERT_FILE": value}, cwd=work)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                result = self.run_gws({**BARE_TOKEN_CALL, "SSL_CERT_FILE": value}, cwd=work)
+                self.assert_ran_on_the_bare_token(result)
         with self.subTest(value="absent"):
-            result = self.run_gws(env, cwd=work)
-            self.assert_rejected_before_gws_or_secrets(
-                result, 1, os.path.realpath(self.root / "project" / ".env"), "SSL_CERT_FILE")
+            result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
+            self.assert_rejected_before_gws_or_secrets(result, 1, self.tree_dotenv(), "SSL_CERT_FILE")
             self.assertNotIn("/srv/evil", result.stderr)
 
     def test_ordinary_or_commented_dotenv_runs(self):
@@ -113,13 +104,9 @@ class Dotenv(Harness):
         }
         for name, text in cases.items():
             with self.subTest(name):
-                work = self.root / name.replace(" ", "-")
-                work.mkdir()
-                (work / ".env").write_text(text, encoding="utf-8")
-                result = self.run_gws({"GWS_ACCOUNT": "personal",
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                work = self.dotenv_dir(name.replace(" ", "-"), text)
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
+                self.assert_ran_on_the_bare_token(result)
 
     def test_only_the_nearest_dotenv_counts(self):
         # dotenvy loads the first .env it finds walking up (find.rs:33-57), so a nearer
@@ -127,10 +114,8 @@ class Dotenv(Harness):
         # fails if the search ever reaches it.
         work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
         (work / ".env").write_text("APP_ENV=dev\n", encoding="utf-8")
-        result = self.run_gws({"GWS_ACCOUNT": "personal",
-                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+        result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
+        self.assert_ran_on_the_bare_token(result)
 
     def test_dotenv_setting_any_gws_setting_is_refused(self):
         # A project .env never supplies a gws setting: the wrapper chooses gws's credentials and
@@ -140,11 +125,8 @@ class Dotenv(Harness):
                     "GOOGLE_WORKSPACE_PROJECT_ID", "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND",
                     "GOOGLE_WORKSPACE_CLI_SOMETHING_NEW"):
             with self.subTest(key=key):
-                work = self.root / key.lower()
-                work.mkdir()
-                (work / ".env").write_text(f"{key}=projects/evil/locations/x/templates/y\n", encoding="utf-8")
-                result = self.run_gws({"GWS_ACCOUNT": "personal",
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                work = self.dotenv_dir(key.lower(), f"{key}=projects/evil/locations/x/templates/y\n")
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
                 self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                 self.assertNotIn("projects/evil", result.stderr)
 
@@ -155,28 +137,21 @@ class Dotenv(Harness):
         gone.mkdir()
         script = f'cd "{gone}" && rmdir "{gone}" && exec "{WRAPPER}" drive files list'
         proc = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30,
-                              env={**self.env, "GWS_ACCOUNT": "personal",
-                                   "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(fields(proc.stdout)["TOKEN"], "fixture-bearer-value")
+                              env={**self.env, **BARE_TOKEN_CALL})
+        self.assert_ran_on_the_bare_token(proc)
 
     def test_a_working_directory_whose_name_ends_in_a_newline_is_not_a_way_past(self):
         # Command substitution strips trailing newlines, so a wrapper that read the working
         # directory that way would search the parent instead and miss this .env.
-        work = self.root / "newline-project\n"
-        work.mkdir()
-        (work / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
-        result = self.run_gws({"GWS_ACCOUNT": "personal",
-                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+        work = self.dotenv_dir("newline-project\n", "SSL_CERT_FILE=/srv/evil/ca.pem\n")
+        result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
         self.assert_rejected_before_gws_or_secrets(result, 1, "SSL_CERT_FILE")
         self.assertIn(os.path.realpath(work / ".env"), result.stderr)
 
     def test_a_tier_command_cannot_reach_a_refused_dotenv_by_changing_directory(self):
         # The pre-command check saw the caller's directory; this one is the check inside the
         # launch, which sees the directory the tier command moved to.
-        hostile = self.root / "hostile"
-        hostile.mkdir()
-        (hostile / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
+        hostile = self.dotenv_dir("hostile", "SSL_CERT_FILE=/srv/evil/ca.pem\n")
         self.write_accounts({"personal": {"tiers": {"read": {
             "command": ["sh", "-c", f'cd "{hostile}" && export GWS_PERSONAL_READ_OAUTH=fixture-bearer-value && exec "$@"', "sh"]}}}})
         result = self.run_gws({"GWS_ACCOUNT": "personal"})
@@ -215,7 +190,7 @@ class Dotenv(Harness):
 
     def test_every_route_to_gws_is_refused_under_a_cert_dotenv(self):
         work = self.dotenv_tree("APP_ENV=dev\nSSL_CERT_FILE=/srv/evil/ca.pem\n")
-        dotenv = os.path.realpath(self.root / "project" / ".env")
+        dotenv = self.tree_dotenv()
         for name, env, args in self.non_tier_routes():
             with self.subTest(name):
                 result = self.run_gws(env, args=args, cwd=work)
@@ -238,8 +213,7 @@ class Dotenv(Harness):
         self.store_login("plain@example.com")
         work = self.dotenv_tree("GOOGLE_APPLICATION_CREDENTIALS=/srv/project/sa.json\n")
         result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, cwd=work)
-        self.assert_rejected_before_gws_or_secrets(
-            result, 1, os.path.realpath(self.root / "project" / ".env"), "GOOGLE_APPLICATION_CREDENTIALS")
+        self.assert_rejected_before_gws_or_secrets(result, 1, self.tree_dotenv(), "GOOGLE_APPLICATION_CREDENTIALS")
         self.assertNotIn("/srv/project", result.stderr)
 
     def test_pass_through_leaves_application_credentials_unset(self):
@@ -262,9 +236,7 @@ class Dotenv(Harness):
                           ("TMPDIR=/srv/evil/tmp\n", "TMPDIR")):
             for account in ("personal", "plain@example.com"):
                 with self.subTest(key=key, account=account):
-                    work = self.root / f"{key.lower()}-{account}"
-                    work.mkdir()
-                    (work / ".env").write_text(text, encoding="utf-8")
+                    work = self.dotenv_dir(f"{key.lower()}-{account}", text)
                     result = self.run_gws({"GWS_ACCOUNT": account}, args=["auth", "status"], cwd=work)
                     self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
                     self.assertNotIn("/srv/evil", result.stderr)
@@ -292,9 +264,7 @@ class Dotenv(Harness):
     # bin/gws fails its own test; the list-driven test below cannot see a key that is gone.
 
     def assert_only_an_auth_call_refuses(self, key, value):
-        work = self.root / f"only-{key.lower()}"
-        work.mkdir()
-        (work / ".env").write_text(f"{key}={value}\n", encoding="utf-8")
+        work = self.dotenv_dir(f"only-{key.lower()}", f"{key}={value}\n")
         self.store_login("plain@example.com")
         result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=["auth", "status"], cwd=work)
         self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), f"sets {key}.")
@@ -330,31 +300,37 @@ class Dotenv(Harness):
         # invalid UTF-8 (iter.rs:34), so the file would supply the key after all. The byte
         # goes through the environment mapping, never through a command line.
         work = self.dotenv_tree("SSL_CERT_FILE=/srv/evil/ca.pem\n")
-        dotenv = os.path.realpath(self.root / "project" / ".env")
-        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        dotenv = self.tree_dotenv()
         with self.subTest("invalid UTF-8"):
             # "\udcff" is how os.fsencode writes the single byte 0xff.
-            result = self.run_gws({**env, "SSL_CERT_FILE": "\udcff"}, cwd=work)
+            result = self.run_gws({**BARE_TOKEN_CALL, "SSL_CERT_FILE": "\udcff"}, cwd=work)
             self.assert_rejected_before_gws_or_secrets(result, 1, dotenv, "SSL_CERT_FILE")
         with self.subTest("valid UTF-8 control"):
-            result = self.run_gws({**env, "SSL_CERT_FILE": "\u00ff"}, cwd=work)
+            result = self.run_gws({**BARE_TOKEN_CALL, "SSL_CERT_FILE": "\u00ff"}, cwd=work)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_an_invalid_utf8_proxy_is_not_treated_as_the_callers(self):
         # Same rule for the proxy pairs: a value dotenvy would replace is not the caller's,
         # so the launch empties the pair instead of copying it into the twin.
         work = self.dotenv_tree("HTTPS_PROXY=http://dotenv-proxy.invalid:3128\n")
-        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
         with self.subTest("invalid UTF-8"):
-            result = self.run_gws({**env, "HTTPS_PROXY": "\udcff"}, cwd=work)
+            result = self.run_gws({**BARE_TOKEN_CALL, "HTTPS_PROXY": "\udcff"}, cwd=work)
             self.assertEqual(result.returncode, 0, result.stderr)
             neutral = fields(result.stdout)["NEUTRAL"].split()
             self.assertIn("HTTPS_PROXY", neutral)
             self.assertIn("https_proxy", neutral)
         with self.subTest("valid UTF-8 control"):
-            result = self.run_gws({**env, "HTTPS_PROXY": "http://caller.example:3128"}, cwd=work)
+            result = self.run_gws({**BARE_TOKEN_CALL, "HTTPS_PROXY": "http://caller.example:3128"}, cwd=work)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("https_proxy=http://caller.example:3128", fields(result.stdout)["SET"])
+
+    def wrapper_launching_through(self, shell):
+        """A copy of bin/gws whose launch runs through SHELL instead of /bin/sh."""
+        copy = self.root / f"launch-through-{os.path.basename(shell)}" / "gws"
+        copy.parent.mkdir()
+        copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", shell), encoding="utf-8")
+        copy.chmod(0o755)
+        return copy
 
     def test_an_inherited_dotted_name_exempts_its_key_only_when_gws_receives_it(self):
         # dotenvy accepts a dot in a key and keeps an inherited value for it, but gws receives
@@ -367,16 +343,12 @@ class Dotenv(Harness):
         write_stub(self.stub_dir, "gws",
                    f'echo "SEEN=$(/usr/bin/env | grep -cxF "{key}=caller-value" || true)"')
         work = self.dotenv_tree(f"{key}=project-value\n")
-        env = {"GWS_ACCOUNT": "personal", key: "caller-value",
-               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
+        env = {**BARE_TOKEN_CALL, key: "caller-value"}
         for shell, passes_the_name in (("/bin/bash", True), ("/bin/dash", False)):
             with self.subTest(shell=shell):
                 if not os.access(shell, os.X_OK):
                     self.skipTest(f"{shell} is not on this host")
-                copy = self.root / f"launch-through-{os.path.basename(shell)}" / "gws"
-                copy.parent.mkdir()
-                copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", shell), encoding="utf-8")
-                copy.chmod(0o755)
+                copy = self.wrapper_launching_through(shell)
                 result = self.run_gws(env, cwd=work, wrapper=copy)
                 if passes_the_name:
                     # gws receives the caller's value, so dotenvy leaves it and the file sets nothing.
@@ -384,8 +356,7 @@ class Dotenv(Harness):
                     self.assertIn("SEEN=1", result.stdout)
                 else:
                     # gws never receives it, so dotenvy sets the key from the file: refused.
-                    self.assert_rejected_before_gws_or_secrets(
-                        result, 1, os.path.realpath(self.root / "project" / ".env"), key)
+                    self.assert_rejected_before_gws_or_secrets(result, 1, self.tree_dotenv(), key)
 
     def test_a_dotted_name_does_not_exempt_a_key_on_the_login_route_through_script(self):
         # util-linux script hands the command to the caller's $SHELL, which may drop a name
@@ -396,15 +367,10 @@ class Dotenv(Harness):
         if os.uname().sysname == "Darwin":
             self.skipTest("macOS's script does not go through the caller's shell")
         write_stub(self.stub_dir, "forward", ":")
-        copy = self.root / "launch-through-bash" / "gws"
-        copy.parent.mkdir()
-        copy.write_text(WRAPPER.read_text(encoding="utf-8").replace("/bin/sh", "/bin/bash"), encoding="utf-8")
-        copy.chmod(0o755)
+        copy = self.wrapper_launching_through("/bin/bash")
         for key, expect in (("GOOGLE_WORKSPACE_.PROBE", "refused"), ("GOOGLE_WORKSPACE_PROBE", "runs")):
             with self.subTest(key=key):
-                work = self.root / f"script-{key.lower()}"
-                work.mkdir()
-                (work / ".env").write_text(f"{key}=project-value\n", encoding="utf-8")
+                work = self.dotenv_dir(f"script-{key.lower()}", f"{key}=project-value\n")
                 result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: "caller-value"},
                                       args=["auth", "login"], cwd=work, wrapper=copy)
                 if expect == "refused":
@@ -469,17 +435,13 @@ class Dotenv(Harness):
         }
         for name, (text, expect) in cases.items():
             with self.subTest(name):
-                work = self.root / name.replace(" ", "-")
-                work.mkdir()
-                (work / ".env").write_bytes(text)
-                result = self.run_gws({"GWS_ACCOUNT": "personal",
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                work = self.dotenv_dir(name.replace(" ", "-"), text)
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
                 if expect == "refused":
                     self.assert_rejected_before_gws_or_secrets(
                         result, 1, os.path.realpath(work / ".env"), "SSL_CERT_FILE")
                 else:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                    self.assert_ran_on_the_bare_token(result)
                 self.assertNotIn("/srv/evil", result.stdout + result.stderr)
 
     def test_a_character_split_across_a_jq_read_block_is_read_whole(self):
@@ -496,11 +458,8 @@ class Dotenv(Harness):
             with self.subTest(split):
                 text = ("APP=" + "a" * pad + "\u3000" + rest).encode()
                 self.assertEqual(text.index("\u3000".encode()), 4 + pad)
-                work = self.root / f"pad-{pad}"
-                work.mkdir()
-                (work / ".env").write_bytes(text)
-                result = self.run_gws({"GWS_ACCOUNT": "personal",
-                                       "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
+                work = self.dotenv_dir(f"pad-{pad}", text)
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
                 self.assert_rejected_before_gws_or_secrets(
                     result, 1, os.path.realpath(work / ".env"),
                     "SSL_CERT_FILE", "GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE")
@@ -510,7 +469,6 @@ class Dotenv(Harness):
         # dotenvy's finder stops on any metadata error but NotFound (find.rs:36-46), wherever
         # in the candidate's path the error arises. Each outcome is the compiled dotenvy 0.15.7
         # oracle's, run from the child directory under a parent .env that sets SSL_CERT_FILE.
-        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}
 
         def locked(candidate):
             (candidate.parent / "locked").mkdir(mode=0o000)
@@ -543,11 +501,10 @@ class Dotenv(Harness):
                 work.mkdir(parents=True)
                 (parent / ".env").write_text("SSL_CERT_FILE=/srv/evil/ca.pem\n", encoding="utf-8")
                 make(work / ".env")
-                result = self.run_gws(env, cwd=work)
+                result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
                 if expect == "runs":
                     # The nearest candidate errors, so dotenvy never reaches the parent file.
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+                    self.assert_ran_on_the_bare_token(result)
                 else:
                     self.assert_rejected_before_gws_or_secrets(
                         result, 1, os.path.realpath(parent / ".env"), "SSL_CERT_FILE")
@@ -556,8 +513,10 @@ class Dotenv(Harness):
         # Read the lists from the wrapper itself, so a key added there is tested here without a
         # second copy: refused keys and prefixes stop the call, neutral keys arrive empty, and
         # PATH, which is always set, leaves the call running.
+        wrapper_lines = WRAPPER.read_text(encoding="utf-8").splitlines()
+
         def wrapper_list(name):
-            for line in WRAPPER.read_text(encoding="utf-8").splitlines():
+            for line in wrapper_lines:
                 if line.startswith(f'readonly {name}="'):
                     return line.split('"')[1].split()
             self.fail(f"bin/gws defines no {name}")
@@ -575,9 +534,7 @@ class Dotenv(Harness):
         for index, (key, args, expect) in enumerate(cases):
             with self.subTest(key=key, args=args[0]):
                 # Numbered, not named by key: macOS's filesystem folds HTTP_PROXY and http_proxy.
-                work = self.root / f"list-{index}"
-                work.mkdir()
-                (work / ".env").write_text(f"{key}=/srv/evil\n", encoding="utf-8")
+                work = self.dotenv_dir(f"list-{index}", f"{key}=/srv/evil\n")
                 result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"}, args=args, cwd=work)
                 if expect == "refused":
                     self.assert_rejected_before_gws_or_secrets(result, 1, os.path.realpath(work / ".env"), key)
@@ -589,119 +546,8 @@ class Dotenv(Harness):
 
     def test_gcloud_keys_do_not_block_a_call_that_starts_no_gcloud(self):
         work = self.dotenv_tree("CLOUDSDK_PYTHON=/usr/bin/python3\nPYTHONPATH=src\nLD_LIBRARY_PATH=/opt/lib\n")
-        result = self.run_gws({"GWS_ACCOUNT": "personal",
-                               "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value"}, cwd=work)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
-
-    def test_reentry_with_an_empty_tier_value_is_refused(self):
-        result = self.run_gws({
-            "GWS_ACCOUNT": "personal",
-            "GWS_ACCOUNTS_REENTRY": str(self.stub_dir / "reentered"),
-            "GWS_PERSONAL_READ_OAUTH": "",
-        })
-        self.assert_rejected_before_gws_or_secrets(
-            result, 1, "ran gws without setting GWS_PERSONAL_READ_OAUTH"
-        )
-
-    def test_unknown_tier_lists_the_account_tiers(self):
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "admin"})
-        self.assert_fails(result, "no tier 'admin'", "GWS_TIER=read", "GWS_TIER=send")
-        self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_account_without_a_read_tier_needs_a_tier(self):
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "sendonly"}), "no read tier", "GWS_TIER=send")
-        result = self.run_gws({"GWS_ACCOUNT": "sendonly", "GWS_TIER": "send",
-                               "STUB_VALUE_GWS_SENDONLY_SEND_OAUTH": credential("sendonly")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_account_without_tiers_runs_on_its_own_store(self):
-        for stored in ("credentials.enc", "credentials.json"):
-            with self.subTest(stored=stored):
-                path = self.store_login("plain@example.com", stored)
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"})
-                path.unlink()
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(fields(result.stdout)["DIR"], str(self.gws_root / "plain@example.com"))
-                self.assertEqual(fields(result.stdout)["FILE"], "")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_account_without_tiers_and_no_stored_login_is_loud(self):
-        # Real gws falls back to Application Default Credentials on a store
-        # with no login, which would run the call as another identity.
-        adc = self.stub_dir / "adc.json"
-        adc.write_text(credential("adc"), encoding="utf-8")
-        store = self.gws_root / "plain@example.com"
-        for name, prepare in (("no store", lambda: None), ("empty store", lambda: store.mkdir(exist_ok=True))):
-            with self.subTest(name):
-                prepare()
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GOOGLE_APPLICATION_CREDENTIALS": str(adc)})
-                self.assert_fails(result, str(store), "no stored login", "GWS_ACCOUNT=plain@example.com gws auth login")
-
-    def test_tier_on_an_account_without_tiers_is_loud(self):
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GWS_TIER": "read"}), "has no tiers")
-
-    def test_credential_on_an_account_without_tiers_is_loud(self):
-        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_PLAIN_EXAMPLE_COM_READ_OAUTH"):
-            with self.subTest(key=key):
-                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: credential("other")})
-                self.assert_fails(result, "gws-accounts: ", key, "has no tiers", str(self.gws_root / "plain@example.com"))
-
-    def test_stored_login_in_a_tiered_account_is_loud(self):
-        for stored in ("credentials.enc", "credentials.json"):
-            with self.subTest(stored=stored):
-                path = self.store_login("personal", stored)
-                result = self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")})
-                path.unlink()
-                # A deleted credential cannot be restored, so the fix offered first keeps it.
-                self.assert_fails(result, stored, f"mv '{path}' '{path}.pre-gws-accounts'")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_credential_for_an_unselected_tier_or_account_is_loud(self):
-        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_SENDONLY_SEND_OAUTH", "GWS_OTHER_ADMIN_OAUTH"):
-            with self.subTest(key=key):
-                result = self.run_gws({"GWS_ACCOUNT": "personal", key: credential("other")})
-                self.assert_fails(result, key, "GWS_PERSONAL_READ_OAUTH")
-                self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_selected_credential_already_set_is_used_without_the_command(self):
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "send",
-                               "GWS_PERSONAL_SEND_OAUTH": credential("caller-injected")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"id": "caller-injected"', result.stdout)
-        self.assertNotIn("FETCHED=", result.stderr)
-
-    def test_tier_command_that_never_runs_gws_is_loud(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["true"]}}}})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "exited 0 without running gws")
-
-    def test_tier_command_that_does_not_set_the_credential_is_loud(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["env"]}}}})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "ran gws without setting GWS_A_READ_OAUTH")
-
-    def test_failing_tier_command_keeps_its_exit_status(self):
-        self.write_accounts({"a": {"tiers": {"read": {"command": ["sh", "-c", "exit 7"]}}}})
-        result = self.run_gws({"GWS_ACCOUNT": "a"})
-        self.assertEqual(result.returncode, 7)
-        self.assertIn("failed (exit 7) before running gws", result.stderr)
-
-    def test_credential_without_client_id_is_loud(self):
-        bad = json.dumps({"type": "authorized_user", "client_secret": "s", "refresh_token": "r"})
-        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": bad}), "client_id")
-
-    def test_credential_without_client_secret_is_rejected_before_gws_or_secrets(self):
-        bad = json.dumps({"type": "authorized_user", "client_id": "id", "refresh_token": "r"})
-        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_PERSONAL_READ_OAUTH": bad})
-        self.assert_rejected_before_gws_or_secrets(result, 1, "GWS_PERSONAL_READ_OAUTH is missing a non-empty client_secret")
-
-    def test_argument_with_spaces_survives_the_tier_command(self):
-        result = self.run_gws(
-            {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")},
-            args=["drive", "files", "list", "--params", '{"q": "name contains hello there"}'],
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('ARG={"q": "name contains hello there"}\n', result.stdout)
-        self.assertEqual(result.stdout.count("ARG="), 5)
+        result = self.run_gws(BARE_TOKEN_CALL, cwd=work)
+        self.assert_ran_on_the_bare_token(result)
 
 
 if __name__ == "__main__":

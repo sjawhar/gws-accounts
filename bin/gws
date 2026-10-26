@@ -257,17 +257,17 @@ real_command() {
     # wrapper's for an exec and a child's otherwise; sh knows its own where
     # bash 3.2 has no $BASHPID, and its exec keeps it.
     local real_gws="$1" name pair upper lower
-    reject_redirecting_dotenv "${2:-}"
     snapshot_exported
+    reject_redirecting_dotenv "${2:-}"
     for pair in $DOTENV_PROXY_PAIRS; do
         upper="${pair%:*}" lower="${pair#*:}"
         # dotenvy_keeps, not merely "set": a value dotenvy would replace is
         # not the caller's to preserve.
-        if dotenvy_keeps "$upper" && ! dotenvy_keeps "$lower"; then
-            export "$lower=${!upper}"
-        elif ! dotenvy_keeps "$upper" && dotenvy_keeps "$lower"; then
+        if dotenvy_keeps "$upper"; then
+            dotenvy_keeps "$lower" || export "$lower=${!upper}"
+        elif dotenvy_keeps "$lower"; then
             export "$upper=${!lower}"
-        elif ! dotenvy_keeps "$upper"; then
+        else
             export "$upper=" "$lower="
         fi
     done
@@ -315,21 +315,15 @@ auth_subcommand() {
     done
 }
 
-require_jq() {
-    command -v jq >/dev/null 2>&1 && return 0
-    echo "gws-accounts: jq is not on PATH" >&2
-    exit 127
-}
-
-require_perl() {
-    command -v perl >/dev/null 2>&1 && return 0
-    echo "gws-accounts: perl is not on PATH" >&2
+require_command() {
+    command -v "$1" >/dev/null 2>&1 && return 0
+    echo "gws-accounts: $1 is not on PATH" >&2
     exit 127
 }
 
 validate_accounts() {
     [[ -f "$ACCOUNTS_FILE" ]] || die "$ACCOUNTS_FILE not found. Create it (see the gws-accounts README), or set GOOGLE_WORKSPACE_CLI_CONFIG_DIR to a gws config directory outside it to run gws without an account."
-    require_jq
+    require_command jq
     local err
     err="$(jq -r "${JQ_DEFS}"'first(errors) // empty' "$ACCOUNTS_FILE")" || die "$ACCOUNTS_FILE is not valid JSON"
     [[ -z "$err" ]] || die "$ACCOUNTS_FILE: $err"
@@ -451,7 +445,7 @@ dotenv_file() {
     # a working directory that no longer exists has no .env for gws to load.
     dir="$(pwd -P && printf x)" || return 0
     dir="${dir%$'\nx'}"
-    require_perl
+    require_command perl
     found="$("${PERL_COMMAND[@]}" find "$dir")" || die "could not look for the .env gws would load from $dir"
     [[ -z "$found" ]] || DOTENV="${found%x}"
 }
@@ -466,7 +460,7 @@ snapshot_exported() {
     # bash keeps. Taken afresh each time, since a tier launch exports its six
     # before the check runs.
     local names
-    require_perl
+    require_command perl
     names="$(/bin/sh -c 'exec "$@"' sh "${PERL_COMMAND[@]}" environ)" ||
         die "could not read the environment gws would inherit"
     EXPORTED=" ${names//$'\n'/ } "
@@ -500,27 +494,30 @@ dotenv_assigned_keys() {
         # The codepoints Rust'"'"'s char::is_whitespace matches.
         def ws: [9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,
                  8198,8199,8200,8201,8202,8232,8233,8239,8287,12288];
+        def is_ws: IN(ws[]);
+        def alpha: (. >= 65 and . <= 90) or (. >= 97 and . <= 122);
+        def alnum: alpha or (. >= 48 and . <= 57);
         def lstrip: . as $c | ($c | length) as $n
-            | (first(range(0; $n) | . as $i | select((ws | index($c[$i])) == null)) // $n) as $start
+            | (first(range(0; $n) | select($c[.] | is_ws | not)) // $n) as $start
             | $c[$start:];
         def rstrip: . as $c
-            | (last(range(0; $c | length) | . as $i | select((ws | index($c[$i])) == null)) // -1) as $last_kept
+            | (first(range(($c | length) - 1; -1; -1) | select($c[.] | is_ws | not)) // -1) as $last_kept
             | $c[0:$last_kept + 1];
-        # eval_end_state (iter.rs:84-123) over one physical line.
+        # eval_end_state (iter.rs:84-123) over one physical line; pos is
+        # where the # that starts a comment stands.
         def eval_end($state; $cs):
             reduce range(0; $cs | length) as $i ({pos: 0, state: $state, done: false};
                 if .done then .
-                else .pos = $i
-                    | $cs[$i] as $c
+                else $cs[$i] as $c
                     | if .state == "WhiteSpace" then
-                        if $c == 35 then .state = "Comment" | .done = true
+                        if $c == 35 then .state = "Comment" | .done = true | .pos = $i
                         elif $c == 92 then .state = "Escape"
                         elif $c == 34 then .state = "WeakOpen"
                         elif $c == 39 then .state = "StrongOpen"
                         else .state = "Complete" end
                     elif .state == "Escape" then .state = "Complete"
                     elif .state == "Complete" then
-                        if (ws | index($c)) != null and $c != 10 and $c != 13 then .state = "WhiteSpace"
+                        if ($c | is_ws) and $c != 10 and $c != 13 then .state = "WhiteSpace"
                         elif $c == 92 then .state = "Escape"
                         elif $c == 34 then .state = "WeakOpen"
                         elif $c == 39 then .state = "StrongOpen"
@@ -540,10 +537,10 @@ dotenv_assigned_keys() {
         # digits, _ and . ; null when the first character cannot start a key.
         def take_key($cs):
             if ($cs | length) == 0 then null
-            elif ($cs[0] | [.] | implode | test("^[A-Za-z_]$")) then
+            elif ($cs[0] | alpha or . == 95) then
                 ($cs | length) as $n
                 | (first(range(0; $n)
-                    | select(($cs[.] | [.] | implode | test("^[A-Za-z0-9_.]$")) | not)) // $n) as $i
+                    | select($cs[.] | alnum or . == 95 or . == 46 | not)) // $n) as $i
                 | {key: ($cs[0:$i] | implode), rest: $cs[$i:]}
             else null end;
         # parse_value (parse.rs:123-258) over the codepoints of a value: true
@@ -552,11 +549,10 @@ dotenv_assigned_keys() {
         # whether the name is still empty; done is a # that ends the value. A
         # non-ASCII character in a $NAME may or may not be alphanumeric, so it
         # leads to both states.
-        def alnum: (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122);
         def vstep($c):
             if .done then [.]
             elif .x then (if $c == 32 or $c == 9 then [.] elif $c == 35 then [.done = true] else [] end)
-            elif .e then (if ([92, 39, 34, 36, 32, 110] | index($c)) != null then [.e = false] else [] end)
+            elif .e then (if ($c | IN(92, 39, 34, 36, 32, 110)) then [.e = false] else [] end)
             elif .s then (if $c == 39 then [.s = false] else [.] end)
             elif .m == 2 then (if $c == 125 then [.m = 0 | .n = true] else [.n = false] end)
             elif .m == 1 then
@@ -585,19 +581,17 @@ dotenv_assigned_keys() {
             else ($rest[1:] | lstrip) as $v
                 | if ($v | length) == 0 or $v[0] == 35 or value_ok($v) then $k else null end
             end;
+        # The same for a key take_key found, which may be null.
+        def assignment($k): if $k == null then null else assigned($k.key; $k.rest | lstrip) end;
         # parse_line (parse.rs:41-74): the key of an assignment, "" for a
         # blank or comment line, and null when dotenvy stops here.
         def parse_line($cs0):
             ($cs0 | rstrip | lstrip) as $cs
             | if ($cs | length) == 0 or $cs[0] == 35 then ""
             else take_key($cs) as $k
-                | if $k == null then null
-                else ($k.rest | lstrip) as $rest
-                    | if $k.key == "export" and (($rest | length) == 0 or $rest[0] != 61) then
-                        take_key($rest) as $k2
-                        | if $k2 == null then null else assigned($k2.key; $k2.rest | lstrip) end
-                    else assigned($k.key; $rest) end
-                end
+                | if $k != null and $k.key == "export" and ($k.rest | lstrip | length == 0 or .[0] != 61) then
+                    assignment(take_key($k.rest | lstrip))
+                else assignment($k) end
             end;
         # The codepoints back into text, then remove_bom (iter.rs:58-66), then
         # the physical lines, each keeping the newline the state machine reads.
@@ -609,9 +603,9 @@ dotenv_assigned_keys() {
         # QuotedLines (iter.rs:125-179): join physical lines into logical ones.
         | reduce .[] as $line ({buf: "", state: "Complete", out: []};
             (.buf + $line) as $joined
-            | if (($joined | explode | lstrip | implode) | startswith("#")) then
+            | if ($joined | explode | lstrip | .[0]) == 35 then
                 .out += [""] | .buf = "" | .state = "Complete"
-            else (.buf | explode | length) as $bufpos
+            else (.buf | length) as $bufpos
                 | eval_end(.state; ($line | explode)) as $r
                 | if $r.state == "Complete" then
                     .out += [$joined | sub("\r?\n$"; "")] | .buf = "" | .state = "Complete"
@@ -622,10 +616,8 @@ dotenv_assigned_keys() {
             end)
         | .out
         # Keys, in order, stopping where dotenvy stops.
-        | . as $lines
-        | [range(0; $lines | length) | parse_line($lines[.] | explode)] as $parsed
-        | (first(range(0; $parsed | length) | select($parsed[.] == null)) // ($parsed | length)) as $stop
-        | $parsed[0:$stop] | map(select(. != "")) | .[]
+        | label $stop | .[] | parse_line(explode)
+        | if . == null then break $stop elif . == "" then empty else . end
     '
 }
 
@@ -633,18 +625,18 @@ reject_redirecting_dotenv() {
     # Refuse when the .env gws would load sets a key the launch cannot
     # neutralise, and dotenvy would not keep the caller's value. An auth call
     # ($1 = auth), which starts gcloud, also refuses the keys that child reads.
-    # The variables a tier launch assigns are set by then, and so exempt.
+    # It reads EXPORTED, which the caller takes after the launch's own
+    # exports, so the variables a tier launch assigns are exempt.
     # Values are never read into the wrapper.
     local all_keys="$DOTENV_REFUSE_KEYS" all_prefixes="$DOTENV_REFUSE_PREFIXES"
     local key keys prefix protected found=""
-    snapshot_exported
     if [[ "${1:-}" == auth ]]; then
         all_keys="$all_keys $DOTENV_AUTH_KEYS"
         all_prefixes="$all_prefixes $DOTENV_AUTH_PREFIXES"
     fi
     dotenv_file
     [[ -n "$DOTENV" && -r "$DOTENV" ]] || return 0
-    require_jq
+    require_command jq
     # Taken whole, not through a process substitution, so a parser that fails
     # refuses the call instead of reporting no keys.
     keys="$(dotenv_assigned_keys "$DOTENV")" || die "could not read $DOTENV, the .env gws would load"
@@ -685,7 +677,7 @@ tier_launch_env() {
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$4" GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$5"
 }
 
-run_materialized() {
+run_on_tier_credential() {
     # Run real gws with the selected tier credential. An authorized_user JSON
     # credential is written to a 0600 file and may use STORE for its token
     # cache. A bare token goes only through GOOGLE_WORKSPACE_CLI_TOKEN and an
@@ -702,7 +694,7 @@ run_materialized() {
     if [[ "$value" =~ $json ]]; then
         creds_file="${TMP_DIR}/credential.json"
         (umask 077 && printf '%s' "$value" >"$creds_file")
-        require_jq
+        require_command jq
         client_id="$(jq -r '.client_id // empty' "$creds_file")" || die "$key is not valid JSON"
         [[ -n "$client_id" ]] || die "$key is missing a non-empty client_id"
         client_secret="$(jq -r '.client_secret // empty' "$creds_file")" || die "$key is not valid JSON"
@@ -783,10 +775,10 @@ run_auth_login_headless() {
     [[ "$(uname -s)" == Darwin ]] || VIA_SCRIPT=1
     real_command "$real_gws" auth
     local -a cmd=("${REAL_COMMAND[@]}" "$@")
-    if [[ "$(uname -s)" == Darwin ]]; then
-        script -q /dev/null "${cmd[@]}" | tee >(open_first_oauth_url)
-    else
+    if (( VIA_SCRIPT )); then
         script -qefc "$(printf '%q ' "${cmd[@]}")" /dev/null | tee >(open_first_oauth_url)
+    else
+        script -q /dev/null "${cmd[@]}" | tee >(open_first_oauth_url)
     fi
     exit "${PIPESTATUS[0]}"
 }
@@ -874,15 +866,15 @@ $(list_tiers "$ACCOUNT")"
     if [[ -n "${GWS_ACCOUNTS_REENTRY:-}" ]]; then
         : >"$GWS_ACCOUNTS_REENTRY"
         [[ -n "${!key:-}" ]] || die "the $tier tier command for $ACCOUNT ran gws without setting $key"
-        run_materialized "$real_gws" "$key" "$store" "$@"
+        run_on_tier_credential "$real_gws" "$key" "$store" "$@"
     fi
     reject_unselected_credentials "$key" "$tier"
     # Before the tier command releases a credential, check the .env as the
     # launch will see it, with the variables it assigns already set. The launch
     # checks again, in case the tier command changed the directory.
-    ( tier_launch_env "" "" "$store" "" ""; reject_redirecting_dotenv "$cmd" ) || exit
+    ( tier_launch_env "" "" "$store" "" ""; snapshot_exported; reject_redirecting_dotenv "$cmd" ) || exit
     if [[ -n "${!key:-}" ]]; then
-        run_materialized "$real_gws" "$key" "$store" "$@"
+        run_on_tier_credential "$real_gws" "$key" "$store" "$@"
     fi
     run_tier_command "$tier" "$@"
 }

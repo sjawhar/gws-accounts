@@ -9,7 +9,7 @@ import shutil
 import unittest
 from pathlib import Path
 
-from support import Harness, FAKE_ENV, STUB_GWS, WRAPPER, credential, fields, write_stub
+from support import BARE_TOKEN_CALL, Harness, FAKE_ENV, STUB_GWS, WRAPPER, credential, fields, write_stub
 
 
 class Routing(Harness):
@@ -110,21 +110,22 @@ class Routing(Harness):
                 self.write_accounts(accounts)
                 self.assert_rejected_before_gws_or_secrets(self.run_gws({"GWS_ACCOUNT": "a"}), 1, needle)
 
-    def test_missing_jq_is_rejected_before_gws_or_secrets(self):
-        (self.stub_dir / "jq").unlink()
-        for name in ("bash", "head", "tr"):
+    def link_system_tools(self, *names):
+        """Link NAMES from /usr/bin:/bin into the stub directory, for a PATH of that directory alone."""
+        for name in names:
             target = shutil.which(name, path="/usr/bin:/bin")
             self.assertIsNotNone(target, f"the test host needs {name}")
             (self.stub_dir / name).symlink_to(target)
+
+    def test_missing_jq_is_rejected_before_gws_or_secrets(self):
+        (self.stub_dir / "jq").unlink()
+        self.link_system_tools("bash", "head", "tr")
         result = self.run_gws({"PATH": str(self.stub_dir), "GWS_ACCOUNT": "personal"})
         self.assert_rejected_before_gws_or_secrets(result, 127, "jq is not on PATH")
 
     def test_missing_perl_is_rejected_before_gws(self):
         # The .env search needs perl's stat, which reads the errno bash's file tests hide.
-        for name in ("bash", "head", "tr"):
-            target = shutil.which(name, path="/usr/bin:/bin")
-            self.assertIsNotNone(target, f"the test host needs {name}")
-            (self.stub_dir / name).symlink_to(target)
+        self.link_system_tools("bash", "head", "tr")
         result = self.run_gws({"PATH": str(self.stub_dir)}, args=["--version"])
         self.assert_rejected_before_gws_or_secrets(result, 127, "perl is not on PATH")
 
@@ -133,11 +134,9 @@ class Routing(Harness):
         # such locale, so perl warned four lines per helper run, 31 stderr lines a call.
         # PERL_BADLANG=0 silences that; the helper reads and writes bytes either way.
         work = self.dotenv_tree("APP_ENV=dev\n")
-        env = {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": "fixture-bearer-value",
-               "LC_CTYPE": "gws-accounts-no-such.locale"}
+        env = {**BARE_TOKEN_CALL, "LC_CTYPE": "gws-accounts-no-such.locale"}
         result = self.run_gws(env, cwd=work)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(fields(result.stdout)["TOKEN"], "fixture-bearer-value")
+        self.assert_ran_on_the_bare_token(result)
         self.assertNotIn("Setting locale failed", result.stderr)
         self.assertEqual([l for l in result.stderr.splitlines() if l.startswith("perl:")], [])
 
@@ -300,6 +299,115 @@ class Routing(Harness):
                 self.assertNotIn("ARG=", result.stdout)
                 self.assertNotIn(value, result.stdout)
                 self.assertNotIn(value, result.stderr)
+
+    def test_reentry_with_an_empty_tier_value_is_refused(self):
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "GWS_ACCOUNTS_REENTRY": str(self.stub_dir / "reentered"),
+            "GWS_PERSONAL_READ_OAUTH": "",
+        })
+        self.assert_rejected_before_gws_or_secrets(
+            result, 1, "ran gws without setting GWS_PERSONAL_READ_OAUTH"
+        )
+
+    def test_unknown_tier_lists_the_account_tiers(self):
+        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "admin"})
+        self.assert_fails(result, "no tier 'admin'", "GWS_TIER=read", "GWS_TIER=send")
+        self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_account_without_a_read_tier_needs_a_tier(self):
+        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "sendonly"}), "no read tier", "GWS_TIER=send")
+        result = self.run_gws({"GWS_ACCOUNT": "sendonly", "GWS_TIER": "send",
+                               "STUB_VALUE_GWS_SENDONLY_SEND_OAUTH": credential("sendonly")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_account_without_tiers_runs_on_its_own_store(self):
+        for stored in ("credentials.enc", "credentials.json"):
+            with self.subTest(stored=stored):
+                path = self.store_login("plain@example.com", stored)
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com"})
+                path.unlink()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(fields(result.stdout)["DIR"], str(self.gws_root / "plain@example.com"))
+                self.assertEqual(fields(result.stdout)["FILE"], "")
+                self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_account_without_tiers_and_no_stored_login_is_loud(self):
+        # Real gws falls back to Application Default Credentials on a store
+        # with no login, which would run the call as another identity.
+        adc = self.stub_dir / "adc.json"
+        adc.write_text(credential("adc"), encoding="utf-8")
+        store = self.gws_root / "plain@example.com"
+        for name, prepare in (("no store", lambda: None), ("empty store", lambda: store.mkdir(exist_ok=True))):
+            with self.subTest(name):
+                prepare()
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GOOGLE_APPLICATION_CREDENTIALS": str(adc)})
+                self.assert_fails(result, str(store), "no stored login", "GWS_ACCOUNT=plain@example.com gws auth login")
+
+    def test_tier_on_an_account_without_tiers_is_loud(self):
+        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "plain@example.com", "GWS_TIER": "read"}), "has no tiers")
+
+    def test_credential_on_an_account_without_tiers_is_loud(self):
+        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_PLAIN_EXAMPLE_COM_READ_OAUTH"):
+            with self.subTest(key=key):
+                result = self.run_gws({"GWS_ACCOUNT": "plain@example.com", key: credential("other")})
+                self.assert_fails(result, "gws-accounts: ", key, "has no tiers", str(self.gws_root / "plain@example.com"))
+
+    def test_stored_login_in_a_tiered_account_is_loud(self):
+        for stored in ("credentials.enc", "credentials.json"):
+            with self.subTest(stored=stored):
+                path = self.store_login("personal", stored)
+                result = self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")})
+                path.unlink()
+                # A deleted credential cannot be restored, so the fix offered first keeps it.
+                self.assert_fails(result, stored, f"mv '{path}' '{path}.pre-gws-accounts'")
+                self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_credential_for_an_unselected_tier_or_account_is_loud(self):
+        for key in ("GWS_PERSONAL_SEND_OAUTH", "GWS_SENDONLY_SEND_OAUTH", "GWS_OTHER_ADMIN_OAUTH"):
+            with self.subTest(key=key):
+                result = self.run_gws({"GWS_ACCOUNT": "personal", key: credential("other")})
+                self.assert_fails(result, key, "GWS_PERSONAL_READ_OAUTH")
+                self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_selected_credential_already_set_is_used_without_the_command(self):
+        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_TIER": "send",
+                               "GWS_PERSONAL_SEND_OAUTH": credential("caller-injected")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"id": "caller-injected"', result.stdout)
+        self.assertNotIn("FETCHED=", result.stderr)
+
+    def test_tier_command_that_never_runs_gws_is_loud(self):
+        self.write_accounts({"a": {"tiers": {"read": {"command": ["true"]}}}})
+        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "exited 0 without running gws")
+
+    def test_tier_command_that_does_not_set_the_credential_is_loud(self):
+        self.write_accounts({"a": {"tiers": {"read": {"command": ["env"]}}}})
+        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "a"}), "ran gws without setting GWS_A_READ_OAUTH")
+
+    def test_failing_tier_command_keeps_its_exit_status(self):
+        self.write_accounts({"a": {"tiers": {"read": {"command": ["sh", "-c", "exit 7"]}}}})
+        result = self.run_gws({"GWS_ACCOUNT": "a"})
+        self.assertEqual(result.returncode, 7)
+        self.assertIn("failed (exit 7) before running gws", result.stderr)
+
+    def test_credential_without_client_id_is_loud(self):
+        bad = json.dumps({"type": "authorized_user", "client_secret": "s", "refresh_token": "r"})
+        self.assert_fails(self.run_gws({"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": bad}), "client_id")
+
+    def test_credential_without_client_secret_is_rejected_before_gws_or_secrets(self):
+        bad = json.dumps({"type": "authorized_user", "client_id": "id", "refresh_token": "r"})
+        result = self.run_gws({"GWS_ACCOUNT": "personal", "GWS_PERSONAL_READ_OAUTH": bad})
+        self.assert_rejected_before_gws_or_secrets(result, 1, "GWS_PERSONAL_READ_OAUTH is missing a non-empty client_secret")
+
+    def test_argument_with_spaces_survives_the_tier_command(self):
+        result = self.run_gws(
+            {"GWS_ACCOUNT": "personal", "STUB_VALUE_GWS_PERSONAL_READ_OAUTH": credential("p")},
+            args=["drive", "files", "list", "--params", '{"q": "name contains hello there"}'],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('ARG={"q": "name contains hello there"}\n', result.stdout)
+        self.assertEqual(result.stdout.count("ARG="), 5)
 
     # Calls that need no account
 
