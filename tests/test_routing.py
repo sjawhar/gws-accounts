@@ -212,6 +212,19 @@ class Routing(Harness):
                 self.assertFalse(Path(got["FILE"]).exists())
                 self.assertNotIn("LEAKED=", result.stdout)
 
+    def test_a_reason_set_on_the_call_reaches_the_tier_command(self):
+        # The skill tells a caller to set SECRET_RUN_REASON on one call, so the tier's command,
+        # whose own --reason is the same for every caller, can show the approver why.
+        result = self.run_gws({
+            "GWS_ACCOUNT": "personal",
+            "GWS_TIER": "send",
+            "SECRET_RUN_REASON": "reply to the scheduling thread",
+            "STUB_VALUE_GWS_PERSONAL_SEND_OAUTH": credential("personal-send"),
+        }, args=["gmail", "+send", "--to", "a@example.com"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FETCHED=GWS_PERSONAL_SEND_OAUTH", result.stderr)
+        self.assertIn("REASON=reply to the scheduling thread", result.stderr)
+
     def test_bare_access_token_reaches_gws_without_credential_variables(self):
         env_log = self.stub_dir / "env-arguments"
         token_scan_dir = self.stub_dir.parent / "token-scan"

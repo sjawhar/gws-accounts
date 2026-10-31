@@ -70,6 +70,8 @@ exit "${STUB_EXIT:-0}"
 FAKE_SECRETS = r"""key="$1"; shift
 [ "$1" = "--" ] && shift
 echo "FETCHED=$key" >&2
+# A secret runner that shows its approver a reason may read one call's own reason from its environment.
+[ -z "${SECRET_RUN_REASON:-}" ] || echo "REASON=$SECRET_RUN_REASON" >&2
 value_var="STUB_VALUE_$key"
 if [ -z "${!value_var:-}" ]; then echo "fake-secrets: no value for $key" >&2; exit 1; fi
 export "$key=${!value_var}"
