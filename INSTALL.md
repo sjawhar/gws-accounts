@@ -44,7 +44,7 @@ git --version
 curl --version | head -n 1
 ```
 
-If jq is missing: on macOS, `brew install jq`; on Linux, ask the person before running `sudo apt-get install -y jq` (or their distribution's equivalent).
+If jq, git or curl is missing: on macOS, `brew install jq git curl`; on Linux, ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent).
 
 Then look for gws:
 
