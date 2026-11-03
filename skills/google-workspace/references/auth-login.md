@@ -5,6 +5,7 @@
 1. Start it, with its output in a log:
 
    ```bash
+   export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
    log="$(mktemp)"
    GWS_ACCOUNT=<account> nohup perl -e '$SIG{HUP} = "DEFAULT"; setpgrp; $limit = shift;
      defined($pid = fork) or die "fork: $!"; unless ($pid) { exec @ARGV or die "exec: $!" }
@@ -31,6 +32,7 @@
 5. Poll until the login finishes, then check it:
 
    ```bash
+   export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
    GWS_ACCOUNT=<account> gws auth status    # or GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth status
    tail -n 5 "$log"
    ```

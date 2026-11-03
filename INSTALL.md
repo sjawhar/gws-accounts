@@ -8,11 +8,49 @@ Never print a credential: no client secret, refresh token or access token, and n
 
 The [README](README.md) describes how the wrapper behaves. Once step 3 has cloned the repository, the README, skill and reference this guide links to are on disk under `~/.local/share/gws-accounts/`, and later steps refer to them there.
 
+## 0. Prerequisites
+
+Step 1 already runs jq, so check these first:
+
+```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
+bash --version | head -n 1      # 3.2 or later
+perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
+jq --version                    # 1.6 or later
+git --version
+curl --version | head -n 1
+```
+
+If jq, git or curl is missing:
+
+- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`).
+- **macOS:** curl ships with macOS, and so does jq from macOS 15. If `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq 1.7.1's release binary (macOS 13 or later) in `~/.local/bin`, checked against the release's `sha256sum.txt`:
+
+  ```bash
+  (
+    set -e
+    asset="jq-macos-$(uname -m | sed 's/x86_64/amd64/')"
+    base=https://github.com/jqlang/jq/releases/download/jq-1.7.1
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cd "$tmp"
+    curl -fsSLO "$base/$asset"
+    curl -fsSL "$base/sha256sum.txt" | grep " $asset\$" | shasum -a 256 -c
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$asset" "$HOME/.local/bin/jq"
+  )
+  ```
+
+From here on, start every command that runs jq with `export PATH="$HOME/.local/bin:$PATH";`, since your shell may not have `~/.local/bin` on PATH yet; step 3 extends this line for the wrapper.
+
+**Check:** `export PATH="$HOME/.local/bin:$PATH"; jq --version`, and every other command above, prints a version.
+
 ## 1. Ask once
 
 First look at what an earlier gws left, without printing any file's contents:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 ls -la ~/.config/gws 2>/dev/null
 jq -r 'keys[]' ~/.config/gws/accounts.json 2>/dev/null
 env | grep -oE '^GOOGLE_WORKSPACE_CLI_[A-Z_]+'
@@ -34,27 +72,19 @@ Then ask the person these questions in one message, and work without asking agai
 
 Do not ask anything you can check yourself: the operating system, the shell, installed tools, agent harnesses, or whether there is a display.
 
-## 2. Prerequisites
+## 2. gws
+
+Look for gws:
 
 ```bash
-bash --version | head -n 1      # 3.2 or later
-perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
-jq --version                    # 1.6 or later
-git --version
-curl --version | head -n 1
-```
-
-If jq is missing: on macOS, `brew install jq`; on Linux, ask the person before running `sudo apt-get install -y jq` (or their distribution's equivalent).
-
-Then look for gws:
-
-```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 type -a gws && gws --version
 ```
 
 If gws is missing, or older than 0.22.5, put the 0.22.5 release binary in `~/.local/bin`. The wrapper and the skill document 0.22.5, and gws changes its flags between releases.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 (
   set -e
   case "$(uname -s)-$(uname -m)" in
@@ -164,6 +194,7 @@ mkdir -p "<skills dir>"
 Add each account to `~/.config/gws/accounts.json`, with no `tiers` and a description that says who the account is, and create its directory. Agents choose an account by reading these descriptions. An existing file is merged into, never replaced. A name that step 1 found taken, in the file or as a directory, stays as it is: leave that account and its directory alone, skip it in steps 6–8, and ask the person for another name.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 mkdir -p -m 700 ~/.config/gws
 f=~/.config/gws/accounts.json
 [ -e "$f" ] || printf '{}\n' >"$f"
@@ -183,6 +214,7 @@ fi
 **Check:**
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 env -u GWS_ACCOUNT gws drive about get
 ```
 
@@ -195,6 +227,7 @@ gws reads the OAuth client from `client_secret.json` in the store it runs on, so
 **With the organization's file.** An organization's client is usually Internal, which admits only accounts in that organization: Google answers anyone else with an `org_internal` error. Give it to the accounts that organization's Workspace manages (usually those at its domain; a Workspace can have several), and set up every other account, such as a personal Gmail, as described under **Without one** below; if Google still answers an account with `org_internal`, delete that account's `client_secret.json` and set it up that way too. A client the person made themselves, such as one step 1 found in `~/.config/gws`, is not an organization's: copy it to each account its consent screen admits, as with a client from `gws auth setup`. If the organization's file has to be downloaded, save it straight to `~/.config/gws/<name>/client_secret.json` of one organization account you added in step 5 that has no `client_secret.json` yet, never an account that was already there, with `umask 077` set for the download, and use that file as `<path>` for the other organization accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each organization account that has no client yet:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 jq -e '.installed | has("client_id") and has("client_secret") and has("project_id") and has("auth_uri") and has("token_uri")' "<path>" >/dev/null && echo "Desktop client"
 [ -e ~/.config/gws/<name>/client_secret.json ] || install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account that gets this client
 ```
@@ -204,6 +237,7 @@ A file without an `installed` object is some other kind of client, which gws can
 **Without one,** and for the accounts the organization's client does not admit, unless a client the person made themselves already covers them, the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run it once, in a new terminal on this machine (over ssh if they sit elsewhere), naming one of those accounts:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<first name> gws auth setup
 ```
 
@@ -242,6 +276,7 @@ After consent, Google sends the browser to `http://localhost:<port>` on the mach
 ## 8. Verify
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}' | jq -r .user.emailAddress
 ```
 
@@ -250,6 +285,7 @@ GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}' | jq -r .use
 Then confirm that a call naming no account is refused:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 env -u GWS_ACCOUNT gws drive about get
 ```
 
@@ -258,6 +294,7 @@ env -u GWS_ACCOUNT gws drive about get
 If the person answered yes to question 4, remove the earlier login now:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws" gws auth logout
 ```
 
