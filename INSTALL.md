@@ -49,6 +49,7 @@ From here on, start every command that runs jq with `export PATH="$HOME/.local/b
 First look at what an earlier gws left, without printing any file's contents:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 ls -la ~/.config/gws 2>/dev/null
 jq -r 'keys[]' ~/.config/gws/accounts.json 2>/dev/null
 env | grep -oE '^GOOGLE_WORKSPACE_CLI_[A-Z_]+'
@@ -75,6 +76,7 @@ Do not ask anything you can check yourself: the operating system, the shell, ins
 Look for gws:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 type -a gws && gws --version
 ```
 
@@ -190,6 +192,7 @@ mkdir -p "<skills dir>"
 Add each account to `~/.config/gws/accounts.json`, with no `tiers` and a description that says who the account is, and create its directory. Agents choose an account by reading these descriptions. An existing file is merged into, never replaced. A name that step 1 found taken, in the file or as a directory, stays as it is: leave that account and its directory alone, skip it in steps 6–8, and ask the person for another name.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 mkdir -p -m 700 ~/.config/gws
 f=~/.config/gws/accounts.json
 [ -e "$f" ] || printf '{}\n' >"$f"
@@ -209,6 +212,7 @@ fi
 **Check:**
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 env -u GWS_ACCOUNT gws drive about get
 ```
 
@@ -221,6 +225,7 @@ gws reads the OAuth client from `client_secret.json` in the store it runs on, so
 **With the organization's file.** An organization's client is usually Internal, which admits only accounts in that organization: Google answers anyone else with an `org_internal` error. Give it to the accounts that organization's Workspace manages (usually those at its domain; a Workspace can have several), and set up every other account, such as a personal Gmail, as described under **Without one** below; if Google still answers an account with `org_internal`, delete that account's `client_secret.json` and set it up that way too. A client the person made themselves, such as one step 1 found in `~/.config/gws`, is not an organization's: copy it to each account its consent screen admits, as with a client from `gws auth setup`. If the organization's file has to be downloaded, save it straight to `~/.config/gws/<name>/client_secret.json` of one organization account you added in step 5 that has no `client_secret.json` yet, never an account that was already there, with `umask 077` set for the download, and use that file as `<path>` for the other organization accounts. Leave no other copy of it, in Downloads or anywhere else. Check that it is a Desktop-app client, without printing it, then copy it to each organization account that has no client yet:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 jq -e '.installed | has("client_id") and has("client_secret") and has("project_id") and has("auth_uri") and has("token_uri")' "<path>" >/dev/null && echo "Desktop client"
 [ -e ~/.config/gws/<name>/client_secret.json ] || install -m 600 "<path>" ~/.config/gws/<name>/client_secret.json      # once per account that gets this client
 ```
@@ -230,6 +235,7 @@ A file without an `installed` object is some other kind of client, which gws can
 **Without one,** and for the accounts the organization's client does not admit, unless a client the person made themselves already covers them, the person creates a client with `gws auth setup`, which needs [gcloud](https://cloud.google.com/sdk/docs/install) and a terminal: it signs in to gcloud, picks or creates a Google Cloud project, enables the Workspace APIs, and then asks for the ID and secret of a Desktop-app client it tells them how to create in the Cloud Console. You cannot run it for them, since gcloud's sign-in and those prompts read from the terminal. Ask them to run it once, in a new terminal on this machine (over ssh if they sit elsewhere), naming one of those accounts:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<first name> gws auth setup
 ```
 
@@ -268,6 +274,7 @@ After consent, Google sends the browser to `http://localhost:<port>` on the mach
 ## 8. Verify
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}' | jq -r .user.emailAddress
 ```
 
@@ -276,6 +283,7 @@ GWS_ACCOUNT=<name> gws drive about get --params '{"fields":"user"}' | jq -r .use
 Then confirm that a call naming no account is refused:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 env -u GWS_ACCOUNT gws drive about get
 ```
 
@@ -284,6 +292,7 @@ env -u GWS_ACCOUNT gws drive about get
 If the person answered yes to question 4, remove the earlier login now:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws" gws auth logout
 ```
 
