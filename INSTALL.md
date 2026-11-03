@@ -8,6 +8,25 @@ Never print a credential: no client secret, refresh token or access token, and n
 
 The [README](README.md) describes how the wrapper behaves. Once step 3 has cloned the repository, the README, skill and reference this guide links to are on disk under `~/.local/share/gws-accounts/`, and later steps refer to them there.
 
+## 0. Prerequisites
+
+Step 1 already runs jq, so check these first:
+
+```bash
+bash --version | head -n 1      # 3.2 or later
+perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
+jq --version                    # 1.6 or later
+git --version
+curl --version | head -n 1
+```
+
+If jq, git or curl is missing:
+
+- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent).
+- **macOS:** run `brew install jq git curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>. On a fresh Mac, `git --version` may only offer to install the Xcode Command Line Tools: ask the person before running `xcode-select --install`.
+
+**Check:** every command prints a version.
+
 ## 1. Ask once
 
 First look at what an earlier gws left, without printing any file's contents:
@@ -34,17 +53,7 @@ Then ask the person these questions in one message, and work without asking agai
 
 Do not ask anything you can check yourself: the operating system, the shell, installed tools, agent harnesses, or whether there is a display.
 
-## 2. Prerequisites
-
-```bash
-bash --version | head -n 1      # 3.2 or later
-perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
-jq --version                    # 1.6 or later
-git --version
-curl --version | head -n 1
-```
-
-If jq, git or curl is missing: on macOS, `brew install jq git curl`; on Linux, ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent).
+## 2. gws
 
 Then look for gws:
 
