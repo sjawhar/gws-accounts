@@ -13,6 +13,7 @@ The [README](README.md) describes how the wrapper behaves. Once step 3 has clone
 Step 1 already runs jq, so check these first:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 bash --version | head -n 1      # 3.2 or later
 perl -e 'print "perl $^V\n"'   # macOS and most Linux distributions ship it
 jq --version                    # 1.6 or later
@@ -83,6 +84,7 @@ type -a gws && gws --version
 If gws is missing, or older than 0.22.5, put the 0.22.5 release binary in `~/.local/bin`. The wrapper and the skill document 0.22.5, and gws changes its flags between releases.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 (
   set -e
   case "$(uname -s)-$(uname -m)" in
