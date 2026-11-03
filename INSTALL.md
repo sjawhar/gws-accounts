@@ -23,13 +23,26 @@ curl --version | head -n 1
 If jq, git or curl is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`).
-- **macOS:** curl ships with macOS, and so does jq from macOS 15. If `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq's release binary in `~/.local/bin`:
+- **macOS:** curl ships with macOS, and so does jq from macOS 15. If `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq 1.7.1's release binary (macOS 13 or later) in `~/.local/bin`, checked against the release's `sha256sum.txt`:
 
   ```bash
-  mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/jq "https://github.com/jqlang/jq/releases/latest/download/jq-macos-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x ~/.local/bin/jq && export PATH="$HOME/.local/bin:$PATH" && jq --version
+  (
+    set -e
+    asset="jq-macos-$(uname -m | sed 's/x86_64/amd64/')"
+    base=https://github.com/jqlang/jq/releases/download/jq-1.7.1
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cd "$tmp"
+    curl -fsSLO "$base/$asset"
+    curl -fsSL "$base/sha256sum.txt" | grep " $asset\$" | shasum -a 256 -c
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$asset" "$HOME/.local/bin/jq"
+  )
   ```
 
-**Check:** every command prints a version.
+From here on, start every command that runs jq with `export PATH="$HOME/.local/bin:$PATH";`, since your shell may not have `~/.local/bin` on PATH yet; step 3 extends this line for the wrapper.
+
+**Check:** `export PATH="$HOME/.local/bin:$PATH"; jq --version`, and every other command above, prints a version.
 
 ## 1. Ask once
 
