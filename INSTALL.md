@@ -23,7 +23,7 @@ curl --version | head -n 1
 If jq, git or curl is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent).
-- **macOS:** run `brew install jq git curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>. On a fresh Mac, `git --version` may only offer to install the Xcode Command Line Tools: ask the person before running `xcode-select --install`.
+- **macOS:** if `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. Then run `brew install jq git curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>: its installer asks for their password. Then put it on PATH with `eval "$(/opt/homebrew/bin/brew shellenv)"` (`/usr/local/bin/brew` on an Intel Mac), as the installer's last lines say.
 
 **Check:** every command prints a version.
 
@@ -55,7 +55,7 @@ Do not ask anything you can check yourself: the operating system, the shell, ins
 
 ## 2. gws
 
-Then look for gws:
+Look for gws:
 
 ```bash
 type -a gws && gws --version
