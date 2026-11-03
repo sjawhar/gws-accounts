@@ -23,7 +23,11 @@ curl --version | head -n 1
 If jq, git or curl is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq git curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`).
-- **macOS:** if `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh> (its installer asks for their password), then put it on PATH in this shell with `eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"` (Apple silicon, else Intel), as the installer's last lines say. Then run `brew install jq git curl`.
+- **macOS:** curl ships with macOS, and so does jq from macOS 15. If `git --version` only offers to install the Xcode Command Line Tools, ask the person before running `xcode-select --install`, and wait for its installer to finish. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq's release binary in `~/.local/bin`:
+
+  ```bash
+  mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/jq "https://github.com/jqlang/jq/releases/latest/download/jq-macos-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x ~/.local/bin/jq && export PATH="$HOME/.local/bin:$PATH" && jq --version
+  ```
 
 **Check:** every command prints a version.
 
