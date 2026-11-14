@@ -30,7 +30,7 @@ GWS_ACCOUNT=personal GWS_TIER=send gws gmail +send --to a@example.com --subject 
 ```
 
 - `GWS_ACCOUNT=<account>` is shorthand for `GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws/<account>"`. Either works. Write `$HOME`, never a quoted `~`, which does not expand.
-- `GWS_TIER` picks the credential. Unset means `read`. The usual tiers are `read` (Drive, Docs, Sheets, Slides, Calendar, and Gmail read-only), `modify` (Gmail labels, archive, drafts, `+reply`, `+forward`) and `send` (`+send` alone; a `gmail.send` credential cannot read mail, so `+reply` fails under it with `insufficient authentication scopes`). The account's descriptions in the error say what each of its tiers grants.
+- `GWS_TIER` picks the credential. Unset means `read`. The usual tiers are `read` (`drive.readonly`, `documents.readonly`, `spreadsheets.readonly`, `presentations.readonly`, `calendar.readonly`, `tasks.readonly` and `gmail.readonly`: the scopes of `gws auth login --readonly`), `modify` (Gmail labels, archive, drafts, `+reply`, `+forward`), `send` (`+send` alone; a `gmail.send` credential cannot read mail, so `+reply` fails under it with `insufficient authentication scopes`) and a tier for writes to Drive, Docs, Sheets, Slides, Calendar or Tasks, such as `write`: name that tier on each call that changes those files, and never write on `read`. The name of a tier limits nothing: the scopes of its credential set what it can do. The account's descriptions in the error say what each of its tiers grants.
 - A tier's description may say that releasing its credential needs a human: a hardware-key touch, a biometric prompt. Tell the human which account and tier you are about to use before the call, run such calls one at a time, and front-load them before any long unattended work.
 - When a tier's command is `secret-run` and it asks a secrets broker for the credential, the approver sees the call's command and session and the `--reason` in the tier's command, which is the same for every caller. Say why on the call itself: `SECRET_RUN_REASON='<what this call changes, and why>' GWS_ACCOUNT=<account> GWS_TIER=<tier> gws …`. Do not export it: an exported reason labels later calls it does not describe. For another tier command, use the per-call reason variable it documents, if any.
 - An account without tiers runs on the login `gws auth login` stored in its directory. `GWS_TIER` on it is an error. Until that login exists, every call on it except `gws auth` fails with `holds no stored login`; the login is `GWS_ACCOUNT=<account> gws auth login`, which needs the user to consent in a browser (gws auth, below).
@@ -94,10 +94,12 @@ A tier command may instead release a bare, short-lived OAuth2 access token; the 
 store="$(mktemp -d)"
 GOOGLE_WORKSPACE_CLI_CLIENT_ID=<client id> GOOGLE_WORKSPACE_CLI_CLIENT_SECRET=<client secret> \
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
-  gws auth login --scopes 'https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/gmail.readonly'
+  gws auth login --readonly
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth export --unmasked | jq -c . | <store it where the tier's command reads it>
 rm -rf "$store"
 ```
+
+This mints the `read` tier. For another tier, pass `--scopes` with exactly that tier's Workspace scopes in place of `--readonly`.
 
 - Pass the client through the environment. gws also reads a `client_secret.json` in the console's download format, but ignores one missing a required field (`installed.client_id`, `client_secret`, `project_id`, `auth_uri`, or `token_uri`).
 - The consent page names the OAuth client's app, not the account. Tell the human which Google account to choose before they open it.

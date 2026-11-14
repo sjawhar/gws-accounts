@@ -107,7 +107,7 @@ ACCOUNTS = {
     "personal": {
         "description": "Personal Gmail",
         "tiers": {
-            "read": {"command": secrets_cmd("GWS_PERSONAL_READ_OAUTH"), "description": "Drive, Docs, gmail.readonly"},
+            "read": {"command": secrets_cmd("GWS_PERSONAL_READ_OAUTH"), "description": "drive.readonly, documents.readonly, gmail.readonly"},
             "send": {"command": secrets_cmd("GWS_PERSONAL_SEND_OAUTH"), "description": "gmail.send only"},
         },
     },
