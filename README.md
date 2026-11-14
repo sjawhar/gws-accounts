@@ -52,7 +52,7 @@ The skill installs per agent:
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_WORK_READ_OAUTH", "--"],
-        "description": "Drive, Docs, Sheets, Calendar, gmail.readonly"
+        "description": "drive.readonly, documents.readonly, spreadsheets.readonly, presentations.readonly, calendar.readonly, tasks.readonly, gmail.readonly (gws auth login --readonly)"
       },
       "send": {
         "command": ["op", "run", "--env-file", "/Users/alice/.config/gws/work-send.env", "--"],
@@ -80,6 +80,8 @@ A call selects an account the way gws selects a store: `GOOGLE_WORKSPACE_CLI_CON
 ## Tiers
 
 `GWS_TIER=<tier>` selects a tier; unset means `read`. An account with no `read` tier needs `GWS_TIER` on every call except `gws auth`, which takes none.
+
+Mint the `read` tier with read-only scopes only: the seven Workspace scopes that `gws auth login --readonly` requests (`drive.readonly`, `documents.readonly`, `spreadsheets.readonly`, `presentations.readonly`, `calendar.readonly`, `tasks.readonly` and `gmail.readonly`), and the identity scopes (`openid` and the `userinfo` scopes) that gws adds to every login. A call that names no tier runs on `read`, so a write scope there lets every such call write. Put writes to Drive, Docs, Sheets, Slides, Calendar or Tasks on a separate tier, for example `write`, which a call names with `GWS_TIER=write`. The name of a tier limits nothing: the scopes of its credential set what it can do.
 
 A tier's `command` is an argv array. The wrapper appends its resolved absolute path and the original arguments and runs it, so `["secrets", "GWS_WORK_READ_OAUTH", "--"]` becomes `secrets GWS_WORK_READ_OAUTH -- /absolute/path/to/gws drive files list`. The command must start that program with `GWS_<ACCOUNT>_<TIER>_OAUTH` set to either an `authorized_user` JSON credential or a bare OAuth2 access token: the account and tier names upper-cased, with every character outside `A-Z0-9` turned into `_` (`alice@gmail.com`, `read` → `GWS_ALICE_GMAIL_COM_READ_OAUTH`). A value whose first non-whitespace character is `{` is JSON, so pretty-printed JSON with a leading newline works; every other value must be a single non-empty access token with no whitespace anywhere. The wrapper rejects any other value without printing it. The command is not run through a shell, so `~` and `$HOME` do not expand in it.
 
